@@ -6,10 +6,12 @@ using Microsoft Edge with corporate Single Sign-On (SSO).
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 import time
+import urllib.request
 from typing import Any, Callable
 
 from playwright.sync_api import sync_playwright
@@ -212,6 +214,30 @@ class WebCopilotDriver:
         u = (url or "").lower()
         return "cloud.microsoft" in u or "copilot.microsoft.com" in u
 
+    def _live_url(self, page: Any) -> str:
+        """Query live URL from browser over CDP or fallback to cached property."""
+        if not page:
+            return ""
+        if callable(getattr(page, "evaluate", None)):
+            try:
+                val = page.evaluate("() => window.location.href")
+                if val and isinstance(val, str):
+                    return val
+            except Exception:
+                pass
+        return getattr(page, "url", "") or ""
+
+    def _cdp_page_urls(self) -> list[str]:
+        """Direct query to Chromium's /json/list endpoint to detect live page navigations."""
+        if not self.port:
+            return []
+        try:
+            req = urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json/list", timeout=0.8)
+            targets = json.loads(req.read().decode("utf-8"))
+            return [t["url"] for t in targets if t.get("type") == "page" and "url" in t]
+        except Exception:
+            return []
+
     def _check_cancel(self, where: str) -> None:
         """Stop is honoured before the prompt is submitted too: while Edge starts, during sign-in, before typing."""
         if self._cancel_check is not None and self._cancel_check():
@@ -340,32 +366,54 @@ class WebCopilotDriver:
         """Handle corporate SSO redirects. offscreen: show the window if sign-in needs the user."""
         start_wait = time.monotonic()
         limit = SSO_ONSCREEN_AFTER_SECONDS if self.browser_mode == "offscreen" else timeout_seconds
-        while time.monotonic() - start_wait < limit:
-            self._check_cancel("while waiting for sign-in")
+
+        def check_all() -> Any:
             candidates = [page] if _page_alive(page) else []
             if self._context and hasattr(self._context, "pages"):
                 candidates.extend(p for p in self._context.pages if p is not page and _page_alive(p))
             for cand in candidates:
-                if self._ready_url(cand.url):
-                    self._page = cand
-                    return
-                if _is_login_url(cand.url):
-                    print("  [web backend] Completing corporate SSO login redirect in Edge...")
+                cand_url = self._live_url(cand)
+                if self._ready_url(cand_url):
+                    return cand
+                if "cloud.microsoft" in cand_url.lower() and not _is_login_url(cand_url) and "chat" not in cand_url.lower():
                     try:
-                        cand.wait_for_url("**/chat*", timeout=2000)
-                        if self._ready_url(cand.url):
-                            self._page = cand
-                            return
+                        cand.goto(self.url, wait_until="domcontentloaded")
+                        if self._ready_url(self._live_url(cand)):
+                            return cand
+                    except Exception:
+                        pass
+                if _is_login_url(cand_url):
+                    try:
+                        cand.wait_for_url("**/chat*", timeout=1500)
+                        if self._ready_url(self._live_url(cand)):
+                            return cand
                     except Exception:  # noqa: BLE001
                         pass
-            time.sleep(1.0)
-        candidates = [page] if _page_alive(page) else []
-        if self._context and hasattr(self._context, "pages"):
-            candidates.extend(p for p in self._context.pages if p is not page and _page_alive(p))
-        for cand in candidates:
-            if self._ready_url(cand.url):
-                self._page = cand
+            cdp_urls = self._cdp_page_urls()
+            for u in cdp_urls:
+                if self._ready_url(u):
+                    for cand in candidates:
+                        if self._ready_url(self._live_url(cand)):
+                            return cand
+                    if self._context and hasattr(self._context, "pages"):
+                        for p in self._context.pages:
+                            if _page_alive(p) and self._ready_url(self._live_url(p)):
+                                return p
+            return None
+
+        while time.monotonic() - start_wait < limit:
+            self._check_cancel("while waiting for sign-in")
+            ready_page = check_all()
+            if ready_page is not None:
+                self._page = ready_page
                 return
+            time.sleep(1.0)
+
+        ready_page = check_all()
+        if ready_page is not None:
+            self._page = ready_page
+            return
+
         if self.browser_mode == "headless":
             raise RuntimeError(
                 "Headless Edge could not reach M365 Copilot chat (sign-in did not complete without a window). "
@@ -381,15 +429,12 @@ class WebCopilotDriver:
                   "it will move off-screen again when the chat page loads.")
         deadline = time.monotonic() + SSO_INTERACTIVE_WAIT_SECONDS
         while time.monotonic() < deadline:
-            candidates = [page] if _page_alive(page) else []
-            if self._context and hasattr(self._context, "pages"):
-                candidates.extend(p for p in self._context.pages if p is not page and _page_alive(p))
-            for cand in candidates:
-                if self._ready_url(cand.url):
-                    self._page = cand
-                    self._set_window(cand, onscreen=False)
-                    self._say("Signed in; the Edge window is off-screen again.")
-                    return
+            ready_page = check_all()
+            if ready_page is not None:
+                self._page = ready_page
+                self._set_window(ready_page, onscreen=False)
+                self._say("Signed in; the Edge window is off-screen again.")
+                return
             if self._cancel_check is not None and self._cancel_check():
                 self._set_window(win_page, onscreen=False)
                 self._check_cancel("while waiting for sign-in")

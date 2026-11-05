@@ -75,6 +75,11 @@ function fillSelect(sel, values, current) {
 // ------------------------------------------------------------------ rendering
 function appendNotice(item) {
   $('welcome')?.remove();
+  if (item.text && item.text.startsWith('Signed in;')) {
+    conv.querySelectorAll('.note.warn').forEach((el) => {
+      if (el.textContent.includes('Sign-in needed')) el.remove();
+    });
+  }
   const n = el('div', 'note ' + item.level, item.text);
   n.dataset.testid = 'notice';
   conv.append(n);
