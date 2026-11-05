@@ -3,7 +3,7 @@
 APP_NAME = "Agent Neo"
 CODE_NAME = "agent-neo"
 ALIAS_NAME = "neo"
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 
 def version_string() -> str:

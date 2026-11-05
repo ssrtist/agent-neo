@@ -4,6 +4,21 @@ All notable changes to Agent Neo (agent-neo; formerly M365 Chat Agent / agent365
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/). The version lives in `neo_version.py`.
 
+## [0.10.0] - 2026-11-04
+
+Turn-Reduction Pack, Bug Fixes, and Multi-Tier Engine-Prioritized Skills Discovery.
+
+### Added
+- **Batch Tool Calling (`tools`)**: Protocol support for `{"type":"tools","calls":[{"name":...,"arguments":...}, ...]}` allowing models to execute multiple tools in a single turn. Execution halts immediately if any tool in the batch fails or is denied.
+- **Read-Only Exploration Suite**: Added auto-approved `list_dir` (directory listing with sizes) and `grep_search` (pure Python regex scanner with line numbers and file limits).
+- **Line Ranges in `read_file`**: Added optional `start_line` and `end_line` arguments with line-numbered output (`12 | ...`).
+- **Engine-Prioritized Skills Discovery**: `discover_skills()` searches active engine native profile skills first (`.copilot/skills` for Copilot/Desktop, `.gemini/skills` for Gemini, `.deepseek/skills` for DeepSeek), followed by Agent Neo global skills (`.agent-neo/skills`, `.neo/skills`), and fallback engines in order (`.copilot` -> `.gemini` -> `.deepseek` -> `.claude` / `.agents`). Workspace skills always take precedence.
+
+### Fixed
+- **CRLF Line-Ending Preservation**: `edit_file` and `write_file` detect existing newline conventions and preserve CRLF in binary mode without generating spurious git diffs.
+- **Read Truncation Transparency**: Appends explicit `[TRUNCATED: Showing first 100,000 characters of N total...]` banner when content is truncated.
+- **Graceful Shell Timeout**: Caught `subprocess.TimeoutExpired` in `run_shell_command` returning a clean JSON error response with partial stdout/stderr instead of raising an uncaught exception.
+
 ## [0.9.0] - 2026-11-04
 
 Rebrand to **Agent Neo** (`agent-neo`, CLI alias `neo`) and first-class DeepSeek web chat support.

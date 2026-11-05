@@ -101,6 +101,79 @@ class CoreLoopTests(unittest.TestCase):
         self.assertFalse((self.ws / ".neo" / "neo.toml").exists())
         self.assertFalse((self.ws / ".git" / "config").exists())
 
+    # ---- v0.10: turn-reduction & bug fixes
+    def test_batch_tool_execution(self) -> None:
+        batch = {
+            "type": "tools",
+            "calls": [
+                {"name": "list_dir", "arguments": {"path": "."}},
+                {"name": "read_file", "arguments": {"path": "a.txt"}},
+            ],
+        }
+        agent, drv, rec = make_agent(self.ws, batch, final("done batch"))
+        self.assertEqual(agent.run_turn("inspect workspace"), "final")
+        tool_results = rec.of("tool_result")
+        self.assertEqual(len(tool_results), 2)
+        self.assertEqual(tool_results[0]["name"], "list_dir")
+        self.assertEqual(tool_results[1]["name"], "read_file")
+        self.assertTrue(tool_results[0]["ok"])
+        self.assertTrue(tool_results[1]["ok"])
+        self.assertIn("DIRECTORY:", tool_results[0]["preview"])
+        self.assertIn("alpha", tool_results[1]["preview"])
+
+    def test_batch_tool_stops_early_on_denial(self) -> None:
+        batch = {
+            "type": "tools",
+            "calls": [
+                {"name": "delete_file", "arguments": {"path": "a.txt"}},
+                {"name": "write_file", "arguments": {"path": "b.txt", "content": "beta"}},
+            ],
+        }
+        # Deny the first tool
+        agent, drv, rec = make_agent(self.ws, batch, final("done after stop"), approver=ScriptedApprover(False))
+        self.assertEqual(agent.run_turn("try delete and write"), "final")
+        tool_results = rec.of("tool_result")
+        self.assertEqual(len(tool_results), 1)
+        self.assertFalse(tool_results[0]["ok"])
+        self.assertFalse((self.ws / "b.txt").exists())
+        self.assertIn("NOTE: Remaining tools in the batch were NOT executed", drv.prompts[1])
+
+    def test_read_file_line_ranges(self) -> None:
+        sample = (self.ws / "multiline.txt")
+        sample.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+        agent, drv, rec = make_agent(self.ws, tool("read_file", path="multiline.txt", start_line=2, end_line=4), final("got lines"))
+        agent.run_turn("read slice")
+        res = rec.of("tool_result")[0]["preview"]
+        self.assertIn("lines 2-4 of 5", res)
+        self.assertIn("2 | line2", res)
+        self.assertIn("3 | line3", res)
+        self.assertIn("4 | line4", res)
+        self.assertNotIn("1 | line1", res)
+
+    def test_grep_search(self) -> None:
+        (self.ws / "searchme.py").write_text("def find_target_fn():\n    return 42\n", encoding="utf-8")
+        agent, drv, rec = make_agent(self.ws, tool("grep_search", pattern="find_target_fn"), final("found"))
+        agent.run_turn("search")
+        res = rec.of("tool_result")[0]["preview"]
+        self.assertIn("searchme.py:1: def find_target_fn()", res)
+
+    def test_line_endings_preserved_on_edit(self) -> None:
+        crlf_file = (self.ws / "crlf.txt")
+        crlf_file.write_bytes(b"line1\r\nline2\r\nline3\r\n")
+        agent, drv, rec = make_agent(self.ws, tool("edit_file", path="crlf.txt", old="line2", new="line_two"), final("edited"), approver=ScriptedApprover(True))
+        agent.run_turn("edit crlf")
+        raw = crlf_file.read_bytes()
+        self.assertEqual(raw, b"line1\r\nline_two\r\nline3\r\n")
+        self.assertNotIn(b"\r\r\n", raw)
+
+    def test_shell_timeout_returns_error_instead_of_exception(self) -> None:
+        # Command that times out with 0.1s timeout
+        import neo_core as core
+        res = core.run_shell_command("Start-Sleep -Seconds 5", self.ws, timeout=0.5)
+        parsed = json.loads(res)
+        self.assertEqual(parsed["exit_code"], -1)
+        self.assertIn("timed out after 0.5 seconds", parsed["stderr"])
+
     # ---- thought
     def test_thought_event_only_when_present(self) -> None:
         agent, drv, rec = make_agent(self.ws, {**tool("read_file", path="a.txt"), "thought": "check a first"},

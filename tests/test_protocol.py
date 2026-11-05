@@ -87,10 +87,19 @@ class ParseActionTests(unittest.TestCase):
         a = parse_action('```json\n{"type": broken}\n```\n{"type":"final","message":"bare"}')
         self.assertEqual(a["message"], "bare")
 
+    def test_batch_tools_action_is_parsed(self) -> None:
+        raw = '{"type":"tools","calls":[{"name":"list_dir","arguments":{"path":""}},{"name":"read_file","arguments":{"path":"a.txt"}}]}'
+        a = parse_action(raw)
+        self.assertEqual(a["type"], "tools")
+        self.assertEqual(len(a["calls"]), 2)
+        self.assertEqual(a["calls"][0]["name"], "list_dir")
+
     def test_tool_summary(self) -> None:
         self.assertEqual(tool_summary("run_shell", {"command": "Get-ChildItem\n -Name"}), "Get-ChildItem -Name")
         self.assertEqual(tool_summary("read_file", {"path": "a/b.txt"}), "a/b.txt")
         self.assertEqual(tool_summary("run_subagent", {"task": "find x"}), "find x")
+        self.assertEqual(tool_summary("list_dir", {"path": "sub"}), "sub")
+        self.assertEqual(tool_summary("grep_search", {"pattern": "def foo", "path": "src"}), "def foo in src")
         self.assertEqual(tool_summary("x", "not a dict"), "")
 
 
