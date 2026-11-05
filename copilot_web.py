@@ -153,6 +153,15 @@ def _cancelled_exc():
         return _Cancelled
 
 
+def _page_alive(p) -> bool:
+    if p is None:
+        return False
+    try:
+        return not p.is_closed() if callable(getattr(p, "is_closed", None)) else True
+    except Exception:
+        return False
+
+
 class WebCopilotDriver:
     """Automation driver for M365 & Consumer Copilot in Microsoft Edge over CDP.
 
@@ -333,18 +342,30 @@ class WebCopilotDriver:
         limit = SSO_ONSCREEN_AFTER_SECONDS if self.browser_mode == "offscreen" else timeout_seconds
         while time.monotonic() - start_wait < limit:
             self._check_cancel("while waiting for sign-in")
-            if self._ready_url(page.url):
-                return
-            if _is_login_url(page.url):
-                print("  [web backend] Completing corporate SSO login redirect in Edge...")
-                try:
-                    page.wait_for_url("**/chat*", timeout=2000)
+            candidates = [page] if _page_alive(page) else []
+            if self._context and hasattr(self._context, "pages"):
+                candidates.extend(p for p in self._context.pages if p is not page and _page_alive(p))
+            for cand in candidates:
+                if self._ready_url(cand.url):
+                    self._page = cand
                     return
-                except Exception:  # noqa: BLE001
-                    pass
+                if _is_login_url(cand.url):
+                    print("  [web backend] Completing corporate SSO login redirect in Edge...")
+                    try:
+                        cand.wait_for_url("**/chat*", timeout=2000)
+                        if self._ready_url(cand.url):
+                            self._page = cand
+                            return
+                    except Exception:  # noqa: BLE001
+                        pass
             time.sleep(1.0)
-        if self._ready_url(page.url):
-            return
+        candidates = [page] if _page_alive(page) else []
+        if self._context and hasattr(self._context, "pages"):
+            candidates.extend(p for p in self._context.pages if p is not page and _page_alive(p))
+        for cand in candidates:
+            if self._ready_url(cand.url):
+                self._page = cand
+                return
         if self.browser_mode == "headless":
             raise RuntimeError(
                 "Headless Edge could not reach M365 Copilot chat (sign-in did not complete without a window). "
@@ -354,17 +375,23 @@ class WebCopilotDriver:
             # never move it on- or off-screen (close() would not put it back).
             return
         # offscreen: bring the window on-screen for the user, then park it again.
-        self._set_window(page, onscreen=True)
+        win_page = page if _page_alive(page) else (self._context.pages[0] if (self._context and getattr(self._context, "pages", None)) else page)
+        self._set_window(win_page, onscreen=True)
         self._say("Sign-in needed: the Edge window is now on screen. Complete sign-in there; "
                   "it will move off-screen again when the chat page loads.")
         deadline = time.monotonic() + SSO_INTERACTIVE_WAIT_SECONDS
         while time.monotonic() < deadline:
-            if self._ready_url(page.url):
-                self._set_window(page, onscreen=False)
-                self._say("Signed in; the Edge window is off-screen again.")
-                return
+            candidates = [page] if _page_alive(page) else []
+            if self._context and hasattr(self._context, "pages"):
+                candidates.extend(p for p in self._context.pages if p is not page and _page_alive(p))
+            for cand in candidates:
+                if self._ready_url(cand.url):
+                    self._page = cand
+                    self._set_window(cand, onscreen=False)
+                    self._say("Signed in; the Edge window is off-screen again.")
+                    return
             if self._cancel_check is not None and self._cancel_check():
-                self._set_window(page, onscreen=False)
+                self._set_window(win_page, onscreen=False)
                 self._check_cancel("while waiting for sign-in")
             time.sleep(1.0)
         raise TimeoutError(f"M365 sign-in was not completed within {SSO_INTERACTIVE_WAIT_SECONDS}s.")

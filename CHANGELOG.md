@@ -16,6 +16,8 @@ Multi-Hunk File Editing, Background Shell Tasks, Mid-Turn User Questions, Direct
 - **Context Compaction (`/compact`)**: Condenses conversation history into a structured state checkpoint (Goal, Files Touched, Key Findings, Next Steps) and recycles the web chat tab cleanly before re-seeding the next turn.
 
 ### Fixed
+- **Multi-Tab Sign-In Detection**: Updated `_wait_for_sign_in` in `copilot_web.py` to scan all tabs in `self._context.pages`, immediately detecting when an SSO flow redirects to a new tab or replaces the active page target without waiting for the 300s timeout.
+- **Persistent Auth Token Renewal**: Removed `--disable-background-networking` from `EXTENSION_SUPPRESSION_FLAGS` in `browser_automation/browser.py` so Edge can refresh OAuth/SSO tokens in the background without forcing re-login across sessions.
 - **GUI Question Card Rendering & String Answers**: Fixed `askCard` in `gui/app.js` and `GuiSession.approve` in `neo_gui.py` falling back to hard ceiling controls and boolean coercion when models invoke `ask_user`. Rendered dedicated option pill buttons, an interactive text answer box, and preserved user answer strings across IPC.
 
 ## [0.10.0] - 2026-11-04

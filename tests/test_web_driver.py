@@ -98,6 +98,16 @@ class WebDriverTests(unittest.TestCase):
             d._wait_for_sign_in(page, 60)
         self.assertEqual(d.windows, [])
 
+    def test_sign_in_detects_ready_url_in_secondary_tab(self) -> None:
+        d = self._driver()
+        d._launched = True
+        tab1 = SimpleNamespace(url=LOGIN, wait_for_url=_raise)
+        tab2 = SimpleNamespace(url="https://m365.cloud.microsoft/chat?es=SSR", wait_for_url=_raise)
+        d._context = SimpleNamespace(pages=[tab1, tab2])
+        with mock.patch.object(web, "SSO_ONSCREEN_AFTER_SECONDS", 0.05), mock.patch.object(web, "SSO_INTERACTIVE_WAIT_SECONDS", 0.2):
+            d._wait_for_sign_in(tab1, 60)
+        self.assertIs(d._page, tab2)
+
     def test_recognises_both_enterprise_m365_and_consumer_copilot_urls(self) -> None:
         d = self._driver()
         self.assertTrue(d._ready_url("https://m365.cloud.microsoft/chat"))

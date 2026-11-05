@@ -20,7 +20,6 @@ from . import runtime
 # can ignore --disable-extensions and still load.
 EXTENSION_SUPPRESSION_FLAGS = [
     "--disable-extensions",
-    "--disable-background-networking",
     "--disable-component-extensions-with-background-pages",
 ]
 
