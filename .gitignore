@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Workspace & local state
+.agent-neo/
+.neo/
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# Playwright & browser state
+.playwright/
+state/

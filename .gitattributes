@@ -1,0 +1,4 @@
+# Vendored browser libraries stay byte-identical to their npm tarballs (gui/vendor/README.md lists the
+# SHA-256 of each file), so git must never convert their line endings on checkout.
+gui/vendor/** -text
+gui/vendor/README.md text

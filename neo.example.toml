@@ -1,0 +1,65 @@
+# neo.example.toml: harness settings for Agent Neo (agent-neo) 0.9.0.
+#
+# Copy this file to one (or both) of:
+#   ~/.agent-neo/neo.toml               your defaults (NEO_HOME overrides ~/.agent-neo)
+#   <workspace>/.agent-neo/neo.toml     per-workspace settings
+# Precedence, lowest first: built-in defaults < home file < workspace file < command-line flags.
+# An unknown key is ignored with a warning. A malformed file (bad TOML, a wrong type or value)
+# is refused with an error that names the file and the key; agent-neo does not start with it.
+# Every key below shows its built-in default.
+
+# Sub-agents (the run_subagent tool). Off by default; when off, the tool is not advertised to
+# the model and a call to it returns an error. Sub-agents run one at a time, in a separate
+# chat conversation (web: a second tab), with their own step budget and no nesting.
+enable_subagents = false
+subagent_max_steps = 10
+
+# The model may add an optional "thought" field to any reply. Thinking lines are hidden by
+# default (the GUI also has a toggle).
+show_thinking = false
+
+# Tell the model the truth about its host: it is driven through a consumer chat UI in your
+# desktop session, every step is a slow full UI round-trip, replies can be cut off or time out.
+environment_awareness = true
+
+# Extra instructions appended verbatim to the system prompt. A relative path is relative to
+# the folder of the file that sets it. A missing file is an error.
+custom_instructions_file = ""
+
+# Chat backend: "copilot" (default: M365 or Consumer Copilot Web; alias "web") |
+# "gemini" (Google Gemini Web) | "deepseek" (DeepSeek Web Chat) |
+# "desktop" (M365 or Consumer Copilot Windows App) | "auto" | "custom" (any web chat page:
+# see [custom_backend] at the end of this file).
+backend = "copilot"
+
+# Web backend browser: "offscreen" (default: the dedicated Edge runs off-screen and only comes
+# on-screen if sign-in needs you) | "visible" | "headless" (experimental; SSO may fail).
+browser_mode = "offscreen"
+
+# agent-neo's dedicated Edge instance: its own CDP port and profile, separate from your regular
+# browser profile. agent-neo only ever starts, drives and ends the Edge on this profile; a CDP
+# port answered by another browser is refused.
+# The first run needs one sign-in in this profile (the window comes on-screen for it).
+cdp_port = 9365
+# "" = %LOCALAPPDATA%\agent-neo-edge. HOME file only (a workspace file cannot set it); the
+# environment variable NEO_BROWSER_PROFILE overrides it. A relative path is relative to the
+# folder of this file. Your real Edge/Chrome User Data profiles are refused.
+browser_profile_dir = ""
+
+# Step limits: pause for confirmation every step_chunk tool steps; stop at hard_ceiling.
+step_chunk = 10
+hard_ceiling = 255
+
+# Approve every tool call automatically (the same as --yolo). Use with care.
+auto_approve = false
+
+# Custom web backend (backend = "custom", or --backend custom --custom-url URL). agent-neo opens url in its
+# own Edge and, before the first task, runs a pre-harness checklist: connect -> not on a sign-in page ->
+# input found -> send control found -> a canary prompt ("neo canary test") gets a reply bubble.
+# Leave a selector "" to let agent-neo find the element itself; set a CSS selector when it cannot.
+# HOME file or command line only: a workspace file cannot point agent-neo at a page.
+[custom_backend]
+url = ""
+input_selector = ""
+send_selector = ""
+bubble_selector = ""
