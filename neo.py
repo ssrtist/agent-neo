@@ -148,6 +148,18 @@ class CliApprover:
             if kind == "tool":
                 answer = input(f"\nApprove tool call? {request.get('summary', '')}\n[y/N] ").strip().lower()
                 return answer in {"y", "yes"}
+            if kind == "question":
+                q = request.get("question", request.get("summary", ""))
+                opts = request.get("options") or []
+                print(f"\n[?] {q}")
+                if opts:
+                    for i, opt in enumerate(opts, 1):
+                        print(f"  {i}. {opt}")
+                    ans = input(f"Enter choice (1-{len(opts)}) or type answer: ").strip()
+                    if ans.isdigit() and 1 <= int(ans) <= len(opts):
+                        return opts[int(ans) - 1]
+                    return ans if ans else opts[0]
+                return input("Your answer: ").strip()
             if kind == "steps":
                 chunk = request.get("chunk", DEFAULT_STEP_CHUNK)
                 print(f"\n[Safety Threshold] Completed {request.get('step')} autonomous tool steps.")
@@ -298,6 +310,12 @@ def main() -> None:
                 else:
                     driver.new_conversation()
                     print("Started fresh conversation.")
+                continue
+
+            if user_text == "/compact":
+                print("Compacting conversation history...")
+                ckpt = agent.compact()
+                print("Conversation compacted! Structured checkpoint preserved for next turn.")
                 continue
 
             if user_text == "/yolo":

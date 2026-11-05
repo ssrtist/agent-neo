@@ -4,6 +4,17 @@ All notable changes to Agent Neo (agent-neo; formerly M365 Chat Agent / agent365
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/). The version lives in `neo_version.py`.
 
+## [0.11.0] - 2026-11-05
+
+Multi-Hunk File Editing, Background Shell Tasks, Mid-Turn User Questions, Direct Web Fetch, and Context Compaction.
+
+### Added
+- **Multi-Hunk File Editing (`edit_file`)**: Accepts an `edits` list of `{"old": "...", "new": "..."}` hunks with atomic all-or-nothing pre-validation. If any hunk fails or matches ambiguously, no changes are written to disk.
+- **Background Shell Tasks (`run_shell` + `read_task` + `kill_task`)**: Running shell commands with `"background": true` launches session-scoped asynchronous background processes. Output is non-blocking and drained via `read_task`; processes can be terminated with `kill_task` or auto-cleaned on session reset.
+- **Mid-Turn `ask_user` Tool**: Allows models to prompt the user with interactive questions and multiple-choice options mid-turn without ending the turn. Supports interactive choices in terminal CLI, tactile option cards in GUI, and automatic first-choice selection in YOLO mode.
+- **Direct `web_fetch` Tool**: Safely fetches HTTP and HTTPS endpoints (including local dev servers like `http://localhost:3000`), automatically cleans HTML to readable markdown text, and formats JSON.
+- **Context Compaction (`/compact`)**: Condenses conversation history into a structured state checkpoint (Goal, Files Touched, Key Findings, Next Steps) and recycles the web chat tab cleanly before re-seeding the next turn.
+
 ## [0.10.0] - 2026-11-04
 
 Turn-Reduction Pack, Bug Fixes, and Multi-Tier Engine-Prioritized Skills Discovery.

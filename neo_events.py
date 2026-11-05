@@ -21,7 +21,7 @@ from typing import Any, Callable
 SCHEMA_VERSION = 1
 
 TURN_OUTCOMES = ("final", "cancelled", "ceiling", "error")
-APPROVAL_KINDS = ("tool", "steps", "ceiling")
+APPROVAL_KINDS = ("tool", "steps", "ceiling", "question")
 
 # type -> {field: type or tuple of types}. Fields not listed are allowed (optional extras).
 _NUM = (int, float)

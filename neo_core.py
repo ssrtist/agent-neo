@@ -19,6 +19,10 @@ import subprocess
 import threading
 import time
 import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
@@ -55,6 +59,10 @@ Additional tools & features:
 - read_file supports optional "start_line": int and "end_line": int
 - list_dir: {"type":"tool","name":"list_dir","arguments":{"path":"relative/path"}}
 - grep_search: {"type":"tool","name":"grep_search","arguments":{"pattern":"regex","path":"optional/path"}}
+- edit_file supports multi-hunk edits via {"type":"tool","name":"edit_file","arguments":{"path":"relative/path.txt","edits":[{"old":"...","new":"..."}, ...]}}
+- ask_user: {"type":"tool","name":"ask_user","arguments":{"question":"clarification question","options":["opt1","opt2"]}}
+- web_fetch: {"type":"tool","name":"web_fetch","arguments":{"url":"http://localhost:3000/api","max_chars":8000}}
+- run_shell background: {"command":"...","background":true} returns task_id; inspect with read_task {"task_id":"..."} or terminate with kill_task {"task_id":"..."}
 - Batching: multiple tool calls can be combined in one turn via {"type":"tools","calls":[{"name":...,"arguments":...}, ...]}
 
 When finished:
@@ -297,6 +305,175 @@ def _kill_tree(pid: int) -> None:
             pass
 
 
+# --------------------------------------------------------------------------- background tasks & web_fetch
+
+
+class TaskManager:
+    """Session-scoped background process manager."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self._lock = threading.Lock()
+        self._tasks: dict[str, dict[str, Any]] = {}
+        self._counter = 0
+
+    def start_task(self, command: str) -> dict[str, Any]:
+        with self._lock:
+            self._counter += 1
+            task_id = f"task_{self._counter}"
+            if os.name == "nt":
+                argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
+            else:
+                argv = ["/bin/sh", "-lc", command]
+            flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            proc = subprocess.Popen(argv, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    stdin=subprocess.DEVNULL, creationflags=flags)
+            entry = {
+                "id": task_id,
+                "command": command,
+                "proc": proc,
+                "stdout_chunks": [],
+                "stderr_chunks": [],
+                "started_at": time.time(),
+            }
+
+            def _reader(stream, storage):
+                try:
+                    for line in iter(stream.readline, b""):
+                        storage.append(line)
+                except Exception:
+                    pass
+
+            t_out = threading.Thread(target=_reader, args=(proc.stdout, entry["stdout_chunks"]), daemon=True)
+            t_err = threading.Thread(target=_reader, args=(proc.stderr, entry["stderr_chunks"]), daemon=True)
+            t_out.start()
+            t_err.start()
+            self._tasks[task_id] = entry
+            return {"task_id": task_id, "pid": proc.pid, "status": "running", "command": command}
+
+    def read_task(self, task_id: str, max_chars: int = 8000) -> dict[str, Any]:
+        with self._lock:
+            entry = self._tasks.get(task_id)
+            if not entry:
+                return {"error": f"Task {task_id!r} not found"}
+            proc = entry["proc"]
+            alive = proc.poll() is None
+            out_bytes = b"".join(entry["stdout_chunks"])
+            err_bytes = b"".join(entry["stderr_chunks"])
+            out_text = out_bytes.decode("utf-8", errors="replace")[-max_chars:]
+            err_text = err_bytes.decode("utf-8", errors="replace")[-max_chars:]
+            return {
+                "task_id": task_id,
+                "status": "running" if alive else f"exited ({proc.returncode})",
+                "exit_code": proc.returncode,
+                "stdout": out_text,
+                "stderr": err_text,
+            }
+
+    def kill_task(self, task_id: str) -> dict[str, Any]:
+        with self._lock:
+            entry = self._tasks.get(task_id)
+            if not entry:
+                return {"error": f"Task {task_id!r} not found"}
+            proc = entry["proc"]
+            if proc.poll() is None:
+                _kill_tree(proc.pid)
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
+            return {"task_id": task_id, "status": "killed"}
+
+    def kill_all(self) -> None:
+        with self._lock:
+            for task_id in list(self._tasks.keys()):
+                self.kill_task(task_id)
+
+
+class _HTMLTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        t = tag.lower()
+        if t in ("script", "style", "nav", "svg", "noscript", "header", "footer"):
+            self._skip_depth += 1
+        elif t in ("h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "li", "tr", "br"):
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t in ("script", "style", "nav", "svg", "noscript", "header", "footer"):
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif t in ("p", "div", "li", "tr"):
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth == 0:
+            text = re.sub(r"[ \t]+", " ", data)
+            if text:
+                self._parts.append(text)
+
+    def get_text(self) -> str:
+        raw = "".join(self._parts)
+        lines = [line.strip() for line in raw.splitlines()]
+        compacted = []
+        for line in lines:
+            if line:
+                compacted.append(line)
+            elif compacted and compacted[-1] != "":
+                compacted.append("")
+        return "\n".join(compacted)
+
+
+def fetch_url(url: str, max_chars: int = 8000, timeout: float = 15) -> str:
+    """Safely fetch HTTP/HTTPS content, clean HTML to markdown-like text, format JSON."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"ERROR: Only http and https URLs are allowed; got {parsed.scheme!r}"
+    if not parsed.netloc:
+        return f"ERROR: Invalid URL: {url}"
+
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "AgentNeo/0.11 (+https://github.com/ssrtist/agent-neo)"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content_type = resp.headers.get("content-type", "").lower()
+            raw_bytes = resp.read(max_chars * 4)  # read enough for parsing
+            charset = resp.headers.get_content_charset() or "utf-8"
+            body = raw_bytes.decode(charset, errors="replace")
+
+            if "application/json" in content_type:
+                try:
+                    obj = json.loads(body)
+                    formatted = json.dumps(obj, indent=2, ensure_ascii=False)
+                    return formatted[:max_chars]
+                except Exception:
+                    return body[:max_chars]
+
+            if "text/html" in content_type or "<html" in body.lower():
+                extractor = _HTMLTextExtractor()
+                extractor.feed(body)
+                cleaned = extractor.get_text()
+                if len(cleaned) > max_chars:
+                    return cleaned[:max_chars] + f"\n\n[TRUNCATED: Showing first {max_chars} characters of web page]"
+                return cleaned
+
+            if len(body) > max_chars:
+                return body[:max_chars] + f"\n\n[TRUNCATED: Showing first {max_chars} characters]"
+            return body
+    except urllib.error.HTTPError as exc:
+        return f"ERROR: HTTP {exc.code}: {exc.reason}"
+    except urllib.error.URLError as exc:
+        return f"ERROR: URL error: {exc.reason}"
+    except Exception as exc:
+        return f"ERROR: Failed to fetch {url}: {exc}"
+
+
 def run_shell_command(command: str, root: Path, cancel_check: Callable[[], bool] | None = None,
                       timeout: float = 120) -> str:
     if os.name == "nt":
@@ -344,8 +521,42 @@ def execute_tool(
     root: Path,
     approve: Callable[[str], bool],
     cancel_check: Callable[[], bool] | None = None,
+    task_manager: TaskManager | None = None,
+    ask_user_fn: Callable[[str, list[str]], str] | None = None,
 ) -> str:
-    """Run one protocol tool inside the workspace root. Same semantics as 0.3.0."""
+    """Run one protocol tool inside the workspace root."""
+    if name == "ask_user":
+        question = str(args.get("question", "")).strip()
+        if not question:
+            return "ERROR: 'question' argument is required"
+        raw_opts = args.get("options")
+        options = [str(o) for o in raw_opts] if isinstance(raw_opts, list) else []
+        if ask_user_fn:
+            ans = ask_user_fn(question, options)
+            return f"USER ANSWER: {ans}"
+        # Default fallback (e.g. testing)
+        return f"USER ANSWER: {options[0] if options else 'approved'}"
+
+    if name == "web_fetch":
+        url = str(args.get("url", "")).strip()
+        if not url:
+            return "ERROR: 'url' argument is required"
+        max_chars = int(args.get("max_chars", 8000))
+        return fetch_url(url, max_chars=max_chars)
+
+    if name == "read_task":
+        if not task_manager:
+            return "ERROR: No active task manager"
+        task_id = str(args.get("task_id", "")).strip()
+        max_chars = int(args.get("max_chars", 8000))
+        return json.dumps(task_manager.read_task(task_id, max_chars=max_chars), ensure_ascii=False)
+
+    if name == "kill_task":
+        if not task_manager:
+            return "ERROR: No active task manager"
+        task_id = str(args.get("task_id", "")).strip()
+        return json.dumps(task_manager.kill_task(task_id), ensure_ascii=False)
+
     if name == "load_skill":
         skill_name = str(args.get("name", "")).strip()
         if skill_name in skills:
@@ -464,25 +675,47 @@ def execute_tool(
         path = safe_path(root, args["path"])
         if not path.is_file():
             return f"ERROR: File not found: {path}"
-        old, new = str(args["old"]), str(args["new"])
         raw = path.read_bytes()
         is_crlf = b"\r\n" in raw
         text = raw.decode("utf-8", errors="strict")
-        count = text.count(old)
-        if count != 1:
-            # Try normalizing newlines if strict match failed
-            alt_old = old.replace("\r\n", "\n") if is_crlf else old.replace("\n", "\r\n")
-            alt_count = text.count(alt_old)
-            if alt_count == 1:
-                old = alt_old
-                count = 1
-            else:
-                return f"EDIT FAILED: expected exactly 1 match, found {count}"
-        if not approve(f"edit {path}"):
+
+        # Support both multi-hunk edits list and single old/new
+        edits = args.get("edits")
+        if isinstance(edits, list) and edits:
+            hunks: list[tuple[str, str]] = []
+            for idx, e in enumerate(edits, 1):
+                if not isinstance(e, dict) or "old" not in e or "new" not in e:
+                    return f"EDIT FAILED: edit #{idx} must be an object with 'old' and 'new'"
+                hunks.append((str(e["old"]), str(e["new"])))
+        elif "old" in args and "new" in args:
+            hunks = [(str(args["old"]), str(args["new"]))]
+        else:
+            return "EDIT FAILED: must provide either 'edits' list or 'old' and 'new'"
+
+        # Step 1: Atomic validation - verify all targets exist uniquely
+        curr_text = text
+        normalized_hunks: list[tuple[str, str]] = []
+        for idx, (old, new) in enumerate(hunks, 1):
+            count = curr_text.count(old)
+            if count != 1:
+                alt_old = old.replace("\r\n", "\n") if is_crlf else old.replace("\n", "\r\n")
+                if curr_text.count(alt_old) == 1:
+                    old = alt_old
+                    count = 1
+                else:
+                    return f"EDIT FAILED (hunk #{idx} of {len(hunks)}): expected exactly 1 match, found {count}"
+            normalized_hunks.append((old, new))
+            # Test sequential simulation on curr_text to catch overlapping hunks
+            curr_text = curr_text.replace(old, new, 1)
+
+        # Step 2: Request approval
+        summary = f"edit {path} ({len(normalized_hunks)} hunk{'s' if len(normalized_hunks) > 1 else ''})"
+        if not approve(summary):
             return "DENIED BY USER"
-        updated = text.replace(old, new, 1)
-        path.write_bytes(updated.encode("utf-8"))
-        return f"EDITED {path}"
+
+        # Step 3: Write validated changes
+        path.write_bytes(curr_text.encode("utf-8"))
+        return f"EDITED {path} ({len(normalized_hunks)} hunk{'s' if len(normalized_hunks) > 1 else ''} applied)"
 
     if name == "delete_file":
         path = safe_path(root, args["path"])
@@ -499,6 +732,10 @@ def execute_tool(
         command = str(args["command"])
         if not approve(f"run in {root}: {command}"):
             return "DENIED BY USER"
+        if args.get("background"):
+            if not task_manager:
+                return "ERROR: No active task manager"
+            return json.dumps(task_manager.start_task(command), ensure_ascii=False)
         return run_shell_command(command, root, cancel_check)
 
     raise ValueError(f"Unknown tool: {name}")
@@ -598,6 +835,8 @@ class Agent:
         self._sub_counter = 0
         self._context_lost = False
         self._custom = read_custom_instructions(settings)
+        self.task_manager = TaskManager(self.root)
+        self._compact_checkpoint = ""
 
     # ---- plumbing
 
@@ -661,6 +900,19 @@ class Agent:
         assert last_exc is not None
         raise last_exc
 
+    def _ask_user(self, question: str, options: list[str], step: int) -> str:
+        rid = uuid.uuid4().hex[:12]
+        request = self.emit("approval_request", id=rid, kind="question", summary=question,
+                            question=question, options=options, step=step)
+        user_response = self.approver(public(request))
+        self._check_cancel()
+        if user_response is None or user_response is False:
+            ans_str = options[0] if options else "declined"
+        else:
+            ans_str = str(user_response).strip()
+        self.emit("approval_result", id=rid, kind="question", answer=ans_str, auto=False, step=step)
+        return ans_str
+
     def _ask(self, kind: str, summary: str, **extra: Any) -> Any:
         rid = uuid.uuid4().hex[:12]
         request = self.emit("approval_request", id=rid, kind=kind, summary=summary, **extra)
@@ -690,7 +942,41 @@ class Agent:
     # ---- turns
 
     def first_prompt(self, user_text: str) -> str:
-        return f"{self.system_prompt()}\n\nUSER REQUEST:\n{user_text}"
+        base = f"{self.system_prompt()}\n\nUSER REQUEST:\n{user_text}"
+        if self._compact_checkpoint:
+            base = (
+                f"{self.system_prompt()}\n\n"
+                "RESUMED FROM PREVIOUS COMPACTED CONVERSATION CHECKPOINT:\n"
+                f"{self._compact_checkpoint}\n\n"
+                f"CURRENT USER REQUEST / NEXT STEP:\n{user_text}"
+            )
+            self._compact_checkpoint = ""
+        return base
+
+    def compact(self, user_text: str = "") -> str:
+        """Create a compact state checkpoint and reset the conversation tab."""
+        prompt = (
+            "Summarize our active state in exactly 4 concise sections for conversation compaction:\n"
+            "1. Core Goal\n"
+            "2. Files Touched / Inspected\n"
+            "3. Key Findings & Active State\n"
+            "4. Immediate Next Steps\n"
+            "Keep it under 300 words. Respond with ONLY the summary text."
+        )
+        try:
+            summary = self._send(prompt)
+        except Exception:
+            # Fallback to local session event summary
+            summary = (
+                f"Active workspace: {self.root}\n"
+                f"Recent turn: {self.events.turn}\n"
+                f"User request: {user_text}\n"
+            )
+        self._compact_checkpoint = summary.strip()
+        if hasattr(self.driver, "new_conversation"):
+            self.driver.new_conversation()
+        self._status("Conversation compacted and recycled.")
+        return self._compact_checkpoint
 
     def run_turn(self, user_text: str) -> str:
         """Run one user request to its end. Returns the outcome (final|cancelled|ceiling|error)."""
@@ -788,6 +1074,8 @@ class Agent:
                                 name, args, self.skills, self.root,
                                 lambda summary: self._approve_tool(summary, name, args, step),
                                 self.cancel.is_set,
+                                task_manager=self.task_manager,
+                                ask_user_fn=lambda q, opts: self._ask_user(q, opts, step),
                             )
                     except Cancelled:
                         raise

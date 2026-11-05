@@ -174,6 +174,88 @@ class CoreLoopTests(unittest.TestCase):
         self.assertEqual(parsed["exit_code"], -1)
         self.assertIn("timed out after 0.5 seconds", parsed["stderr"])
 
+    def test_multi_hunk_edit_atomic_success(self) -> None:
+        target = self.ws / "code.py"
+        target.write_text("def a():\n    return 1\ndef b():\n    return 2\n", encoding="utf-8")
+        edits = [
+            {"old": "return 1", "new": "return 10"},
+            {"old": "return 2", "new": "return 20"},
+        ]
+        agent, drv, rec = make_agent(self.ws, tool("edit_file", path="code.py", edits=edits), final("done"), approver=ScriptedApprover(True))
+        agent.run_turn("edit both")
+        self.assertEqual(target.read_text(encoding="utf-8"), "def a():\n    return 10\ndef b():\n    return 20\n")
+        self.assertIn("2 hunks applied", rec.of("tool_result")[0]["preview"])
+
+    def test_multi_hunk_edit_atomic_failure_rolls_back(self) -> None:
+        target = self.ws / "code2.py"
+        initial = "def a():\n    return 1\ndef b():\n    return 2\n"
+        target.write_text(initial, encoding="utf-8")
+        edits = [
+            {"old": "return 1", "new": "return 10"},
+            {"old": "NON_EXISTENT", "new": "broken"},
+        ]
+        agent, drv, rec = make_agent(self.ws, tool("edit_file", path="code2.py", edits=edits), final("done"), approver=ScriptedApprover(True))
+        agent.run_turn("edit with failure")
+        self.assertFalse(rec.of("tool_result")[0]["ok"])
+        self.assertIn("EDIT FAILED (hunk #2 of 2)", rec.of("tool_result")[0]["preview"])
+        self.assertEqual(target.read_text(encoding="utf-8"), initial)  # atomic rollback, return 1 was not changed
+
+    def test_background_shell_and_task_lifecycle(self) -> None:
+        agent, drv, rec = make_agent(
+            self.ws,
+            tool("run_shell", command="Write-Output 'bg_started'; Start-Sleep -Seconds 10", background=True),
+            tool("read_task", task_id="task_1"),
+            tool("kill_task", task_id="task_1"),
+            final("done bg"),
+            approver=ScriptedApprover(True, True, True),
+        )
+        agent.run_turn("bg turn")
+        results = rec.of("tool_result")
+        self.assertEqual(len(results), 3)
+        self.assertIn("task_1", results[0]["preview"])
+        self.assertIn("task_1", results[1]["preview"])
+        self.assertIn("killed", results[2]["preview"])
+
+    def test_web_fetch_html_cleaning_and_json(self) -> None:
+        # Mock urllib.request.urlopen to test fetch_url
+        from unittest.mock import MagicMock, patch
+        html_content = b"<html><head><style>body {color:red}</style></head><body><h1>Title</h1><p>Paragraph text</p><script>alert(1)</script></body></html>"
+        resp_mock = MagicMock()
+        resp_mock.read.return_value = html_content
+        resp_mock.headers.get.return_value = "text/html"
+        resp_mock.headers.get_content_charset.return_value = "utf-8"
+        resp_mock.__enter__.return_value = resp_mock
+
+        with patch("urllib.request.urlopen", return_value=resp_mock):
+            import neo_core
+            res = neo_core.fetch_url("http://example.com")
+            self.assertIn("Title", res)
+            self.assertIn("Paragraph text", res)
+            self.assertNotIn("alert(1)", res)
+            self.assertNotIn("color:red", res)
+
+    def test_ask_user_mid_turn(self) -> None:
+        agent, drv, rec = make_agent(
+            self.ws,
+            tool("ask_user", question="Choose flavor", options=["vanilla", "chocolate"]),
+            final("done flavor"),
+            approver=lambda req: "chocolate" if req.get("kind") == "question" else True,
+        )
+        agent.run_turn("flavor turn")
+        results = rec.of("tool_result")
+        self.assertEqual(len(results), 1)
+        self.assertIn("USER ANSWER: chocolate", results[0]["preview"])
+        self.assertIn("TOOL: ask_user", drv.prompts[1])
+        self.assertIn("USER ANSWER: chocolate", drv.prompts[1])
+
+    def test_compact_checkpoint_restarts_conversation(self) -> None:
+        agent, drv, rec = make_agent(self.ws, final("after compaction"))
+        ckpt = agent.compact("initial user request")
+        self.assertTrue(bool(ckpt))
+        first_prompt = agent.first_prompt("continue task")
+        self.assertIn("RESUMED FROM PREVIOUS COMPACTED CONVERSATION CHECKPOINT:", first_prompt)
+        self.assertIn("continue task", first_prompt)
+
     # ---- thought
     def test_thought_event_only_when_present(self) -> None:
         agent, drv, rec = make_agent(self.ws, {**tool("read_file", path="a.txt"), "thought": "check a first"},
