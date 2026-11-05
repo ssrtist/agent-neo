@@ -248,6 +248,21 @@ class CoreLoopTests(unittest.TestCase):
         self.assertIn("TOOL: ask_user", drv.prompts[1])
         self.assertIn("USER ANSWER: chocolate", drv.prompts[1])
 
+    def test_gui_session_approve_question(self) -> None:
+        import neo_gui
+        session = neo_gui.GuiSession(self.ws, {}, None, lambda ev: None)
+        p = neo_gui.PendingApproval({"id": "q1", "kind": "question", "question": "Flavor?", "options": ["A", "B"]})
+        session.pending["q1"] = p
+        self.assertTrue(session.approve("q1", "B"))
+        self.assertEqual(p.answer, "B")
+        self.assertTrue(p.done.is_set())
+
+        p2 = neo_gui.PendingApproval({"id": "q2", "kind": "question", "question": "Flavor?", "options": ["A", "B"]})
+        session.pending["q2"] = p2
+        self.assertTrue(session.approve("q2", False))
+        self.assertIs(p2.answer, False)
+        self.assertTrue(p2.done.is_set())
+
     def test_compact_checkpoint_restarts_conversation(self) -> None:
         agent, drv, rec = make_agent(self.ws, final("after compaction"))
         ckpt = agent.compact("initial user request")

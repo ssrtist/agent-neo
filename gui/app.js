@@ -108,6 +108,7 @@ function renderSteps(run, keyPrefix) {
       for (const a of s.approvals) {
         const txt = a.auto ? 'auto-approved (yolo)' : a.kind === 'tool' ? (a.answer ? 'approved' : 'denied')
           : a.kind === 'steps' ? (a.answer > 0 ? `continued +${a.answer} steps` : 'stopped at the step threshold')
+          : a.kind === 'question' ? (a.answer ? `answered: "${a.answer}"` : 'declined')
             : (a.answer ? 'continued past the ceiling' : 'stopped at the ceiling');
         b.append(el('div', 'note', '✔ ' + txt));
       }
@@ -137,7 +138,10 @@ function askCard(p) {
   card.dataset.testid = 'askcard';
   card.dataset.kind = p.kind;
   const head = el('div', 'askhead', (p.sub ? 'Sub-agent: ' : '') +
-    (p.kind === 'tool' ? `Approve ${p.tool || 'tool'}?` : p.kind === 'steps' ? 'Step threshold reached' : 'Hard ceiling reached'));
+    (p.kind === 'tool' ? `Approve ${p.tool || 'tool'}?`
+     : p.kind === 'steps' ? 'Step threshold reached'
+     : p.kind === 'question' ? 'Question from Agent Neo'
+     : 'Hard ceiling reached'));
   card.append(head, el('div', 'asktext', p.summary));
   if (p.kind === 'tool' && p.args) card.append(el('pre', 'args', JSON.stringify(p.args, null, 2)));
   const row = el('div', 'askchoices');
@@ -160,6 +164,33 @@ function askCard(p) {
     more.dataset.testid = 'continue-n';
     more.onclick = () => answer(Math.max(1, parseInt(n.value, 10) || chunk));
     row.append(btn(`Continue +${chunk}`, chunk, 'rec', 'continue'), n, more, btn('Stop', 0, 'deny', 'stop-steps'));
+  } else if (p.kind === 'question') {
+    if (Array.isArray(p.options) && p.options.length > 0) {
+      for (let i = 0; i < p.options.length; i++) {
+        const opt = p.options[i];
+        row.append(btn(opt, opt, '', `choice-${i}`));
+      }
+    }
+    const qInput = el('input', 'qinput');
+    qInput.type = 'text';
+    qInput.placeholder = (Array.isArray(p.options) && p.options.length > 0) ? 'Or type custom answer...' : 'Type your answer...';
+    qInput.dataset.testid = 'question-input';
+    qInput.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const val = qInput.value.trim();
+        if (val) answer(val);
+      }
+    };
+    const submitBtn = el('button', 'choice rec', 'Submit');
+    submitBtn.dataset.testid = 'submit-answer';
+    submitBtn.onclick = () => {
+      const val = qInput.value.trim();
+      if (val) answer(val);
+      else qInput.focus();
+    };
+    row.append(qInput, submitBtn);
+    setTimeout(() => qInput.focus(), 50);
   } else row.append(btn('Continue', true, 'rec', 'continue'), btn('Stop', false, 'deny', 'stop-ceiling'));
   card.append(row);
   return card;

@@ -225,6 +225,11 @@ class GuiSession:
                 p.answer = max(0, int(answer))
             except (TypeError, ValueError):
                 p.answer = 0
+        elif kind == "question":
+            if answer is False or answer is None:
+                p.answer = False
+            else:
+                p.answer = str(answer).strip()
         else:
             p.answer = bool(answer)
         p.done.set()

@@ -15,6 +15,9 @@ Multi-Hunk File Editing, Background Shell Tasks, Mid-Turn User Questions, Direct
 - **Direct `web_fetch` Tool**: Safely fetches HTTP and HTTPS endpoints (including local dev servers like `http://localhost:3000`), automatically cleans HTML to readable markdown text, and formats JSON.
 - **Context Compaction (`/compact`)**: Condenses conversation history into a structured state checkpoint (Goal, Files Touched, Key Findings, Next Steps) and recycles the web chat tab cleanly before re-seeding the next turn.
 
+### Fixed
+- **GUI Question Card Rendering & String Answers**: Fixed `askCard` in `gui/app.js` and `GuiSession.approve` in `neo_gui.py` falling back to hard ceiling controls and boolean coercion when models invoke `ask_user`. Rendered dedicated option pill buttons, an interactive text answer box, and preserved user answer strings across IPC.
+
 ## [0.10.0] - 2026-11-04
 
 Turn-Reduction Pack, Bug Fixes, and Multi-Tier Engine-Prioritized Skills Discovery.

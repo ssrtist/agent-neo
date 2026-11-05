@@ -122,7 +122,7 @@ export function rollup(turn) {
       tool = sl && sl.tool ? sl.tool.name : '';
       status = last.sub.run.status || status;
     }
-    const doing = turn.pending ? 'waiting for your approval'
+    const doing = turn.pending ? (turn.pending.kind === 'question' ? 'waiting for your answer' : 'waiting for your approval')
       : status || (last.result ? 'thinking…' : last.tool ? 'running…' : 'waiting for reply…');
     return [where, tool, doing].filter(Boolean).join(' · ');
   }

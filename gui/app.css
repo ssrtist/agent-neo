@@ -126,7 +126,11 @@ a { color: var(--acc); }
 .askcard .choice.rec { border-width: 2px; font-weight: 600; }
 .askcard .choice.deny { border-color: var(--err); color: var(--err); }
 .askcard .choice.deny:hover { background: var(--err); color: var(--bg); }
+.askcard[data-kind="question"] { border-color: var(--acc); background: color-mix(in srgb, var(--acc) 10%, var(--bg)); }
+.askcard[data-kind="question"] .askhead { color: var(--acc); }
 .askcard input.n { width: 70px; }
+.askcard input.qinput { flex: 1 1 200px; min-width: 140px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--fg); font-size: 13px; font-family: inherit; }
+.askcard input.qinput:focus { outline: none; border-color: var(--acc); }
 
 /* ---- composer */
 .composer { border-top: 1px solid var(--line); padding: 8px 12px; background: var(--bg2); flex: none; position: relative; }
