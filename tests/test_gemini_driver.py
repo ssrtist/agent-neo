@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 import tests.support  # noqa: F401  (puts the repo on sys.path)
@@ -23,6 +24,10 @@ class _FakeLocator:
     @property
     def first(self):
         return self._items[0] if self._items else self
+
+    @property
+    def last(self):
+        return self._items[-1] if self._items else self
 
     def count(self) -> int:
         return len(self._items)
@@ -103,6 +108,16 @@ class GeminiDriverTests(unittest.TestCase):
         self.assertEqual(reply, '{"type":"final","message":"ok"}')
         self.assertEqual(editor.filled, ["hi"])
         self.assertGreaterEqual(send_btn.clicked, 1)
+
+    def test_has_action_bar_detection(self) -> None:
+        drv = gemini.GeminiWebDriver()
+        # No action bar
+        empty_page = SimpleNamespace(locator=lambda _s: _FakeLocator([], visible=False))
+        self.assertFalse(drv._has_action_bar(empty_page, None))
+
+        # Action bar with Copy button visible on page
+        copy_page = SimpleNamespace(locator=lambda s: _FakeLocator([SimpleNamespace(is_visible=lambda: True)], visible=True) if "Copy" in s else _FakeLocator([], visible=False))
+        self.assertTrue(drv._has_action_bar(copy_page, None))
 
     def test_stop_before_submit_never_types_in_gemini(self) -> None:
         drv = gemini.GeminiWebDriver()

@@ -27,10 +27,16 @@ environment_awareness = true
 custom_instructions_file = ""
 
 # Chat backend: "copilot" (default: M365 or Consumer Copilot Web; alias "web") |
-# "gemini" (Google Gemini Web) | "deepseek" (DeepSeek Web Chat) |
+# "gemini" (Google Gemini Web) | "whatsapp" (WhatsApp Web 1:1 LLM Chat) |
 # "desktop" (M365 or Consumer Copilot Windows App) | "auto" | "custom" (any web chat page:
 # see [custom_backend] at the end of this file).
 backend = "copilot"
+
+# Target phone number for the WhatsApp backend (https://web.whatsapp.com/send/?phone=...).
+whatsapp_phone = "19175123390"
+
+# Optional contact display name to verify active WhatsApp chat (e.g. if saved in your address book).
+whatsapp_contact = ""
 
 # Web backend browser: "offscreen" (default: the dedicated Edge runs off-screen and only comes
 # on-screen if sign-in needs you) | "visible" | "headless" (experimental; SSO may fail).

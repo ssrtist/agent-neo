@@ -11,15 +11,17 @@
   --hl-regexp: #811f3f; --hl-template: #af00db; --hl-addition: #087a50; --hl-deletion: #a31515; --hl-punct: #5c5f66;
   color-scheme: light dark;
 }
-:root[data-theme="dark"] {
-    --bg: #16181d; --bg2: #1d2027; --bg3: #252932; --panel: #1b1e24; --fg: #d9dde5; --dim: #8a91a0; --line: #2f3440;
-    --acc: #6aa7ff; --acc2: #2f6fd6; --acc-fg: #ffffff; --sel: #263752; --sel-line: #6aa7ff; --hover: #232833;
-    --ok: #4ec98a; --warn: #e3b341; --err: #f2706a; --live: #f0883e;
-    --user: #22324a; --code: #12141a;
-    --hl-keyword: #569cd6; --hl-string: #ce9178; --hl-number: #b5cea8; --hl-comment: #6a9955; --hl-type: #4ec9b0;
-    --hl-function: #dcdcaa; --hl-variable: #9cdcfe; --hl-attr: #9cdcfe; --hl-xattr: #9cdcfe; --hl-tag: #569cd6;
-    --hl-regexp: #d16969; --hl-template: #c586c0; --hl-addition: #b5cea8; --hl-deletion: #ce9178; --hl-punct: #8c8c8c;
-  }
+/* Dayfox theme (https://terminalcolors.com/themes/nightfox/dayfox/) */
+:root[data-theme="dayfox"] {
+  --bg: #f6f2ee; --bg2: #e4dcd4; --bg3: #dfd5cb; --panel: #ede6de; --fg: #3d2b5a; --dim: #837a72; --line: #d0c4b6;
+  --acc: #2848a9; --acc2: #1e367e; --acc-fg: #ffffff; --sel: #e7d2be; --sel-line: #2848a9; --hover: #e8dfd5;
+  --ok: #396847; --warn: #ac5402; --err: #a5222f; --live: #cb6f15;
+  --user: #ebdcd2; --code: #eee8e0;
+  --hl-keyword: #a5222f; --hl-string: #396847; --hl-number: #cb6f15; --hl-comment: #837a72; --hl-type: #ac5402;
+  --hl-function: #2848a9; --hl-variable: #3d2b5a; --hl-attr: #287980; --hl-xattr: #287980; --hl-tag: #6e33ce;
+  --hl-regexp: #cb6f15; --hl-template: #6e33ce; --hl-addition: #396847; --hl-deletion: #a5222f; --hl-punct: #837a72;
+  color-scheme: light;
+}
 /* Plan v0.5 D4: GitHub Dark High Contrast (the default; https://terminalcolors.com/themes/github/dark-high-contrast/). */
 :root[data-theme="dark-high-contrast"] {
   --bg: #010409; --bg2: #0d1117; --bg3: #161b22; --panel: #0d1117; --fg: #f0f3f6; --dim: #9ea7b3; --line: #30363d;
@@ -31,7 +33,7 @@
   --hl-regexp: #addcff; --hl-template: #dbb7ff; --hl-addition: #72f088; --hl-deletion: #ffc1ba; --hl-punct: #9ea7b3;
   color-scheme: dark;
 }
-:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="dayfox"] { color-scheme: light; }
 :root[data-theme="light"] { color-scheme: light; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -48,19 +50,26 @@ input, select, textarea { padding: 3px 6px; }
 textarea { resize: none; width: 100%; }
 a { color: var(--acc); }
 
-/* ---- slim header */
-.convhead { display: flex; gap: 8px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--line); flex: none; background: var(--bg2); flex-wrap: wrap; }
-.convhead .title { font-weight: 600; font-size: 14px; white-space: nowrap; }
-.convhead label { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; color: var(--dim); }
-.convhead input.ws { width: 280px; font-size: 12px; }
+/* ---- slim header (minimalist tool ribbon) */
+.convhead { display: flex; gap: 10px; align-items: center; padding: 6px 12px; border-bottom: 1px solid var(--line); flex: none; background: var(--bg2); flex-wrap: nowrap; min-height: 40px; overflow-x: auto; }
+.brand-wrap { display: flex; flex-direction: column; justify-content: center; flex: none; margin-right: 6px; }
+.brand-wrap .title { font-weight: 700; font-size: 13.5px; line-height: 1.15; white-space: nowrap; }
+.brand-wrap .subtitle { font-size: 10px; color: var(--dim); line-height: 1.15; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.convhead .fake { color: var(--live); font-size: 10px; font-weight: 700; }
+.ws-wrap { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 360px; font-size: 12px; color: var(--dim); flex: none; }
+.ws-wrap .lbl { flex: none; font-size: 11px; }
+.ws-pill { font-size: 11.5px; padding: 2px 8px; border-radius: 12px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line); background: var(--bg); cursor: pointer; text-align: left; }
+.ws-pill:hover { border-color: var(--acc); background: var(--hover); }
+.ws-browse { padding: 0 6px; font-weight: 700; line-height: 18px; }
+.convhead label { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; color: var(--dim); flex: none; }
 .convhead .spacer { flex: 1; }
-.convhead .fake { color: var(--live); font-size: 11px; font-weight: 600; }
 .settings-err { flex: none; color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); padding: 4px 12px; font-size: 12px; white-space: pre-wrap; }
 
 /* ---- conversation */
 .conv { flex: 1; overflow: auto; padding: 12px 16px 20px; min-height: 0; }
 .welcome { max-width: 640px; margin: 40px auto; color: var(--dim); }
-.welcome h2 { color: var(--fg); }
+.welcome h2 { color: var(--fg); margin-bottom: 4px; }
+.welcome .tagline { font-weight: 600; color: var(--dim); margin-top: 0; margin-bottom: 16px; font-size: 13px; }
 .msg { margin: 10px 0; border-radius: calc(var(--radius) * 2); padding: 8px 12px; }
 .msg.user { background: var(--user); margin-left: 10%; white-space: pre-wrap; }
 .msg.assistant { background: var(--panel); border: 1px solid var(--line); margin-right: 4%; }
@@ -134,8 +143,11 @@ a { color: var(--acc); }
 
 /* ---- composer */
 .composer { border-top: 1px solid var(--line); padding: 8px 12px; background: var(--bg2); flex: none; position: relative; }
-.composer .crow { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
-.composer .crow .hint { flex: 1; color: var(--dim); font-size: 11.5px; }
+.toolbelt { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: nowrap; }
+.toolbelt-left { display: inline-flex; gap: 5px; align-items: center; flex: none; }
+.toolbelt-center { flex: 1; min-width: 0; text-align: center; }
+.toolbelt-center .hint { color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; max-width: 100%; }
+.toolbelt-right { display: inline-flex; gap: 6px; align-items: center; flex: none; }
 .composer textarea::placeholder { color: var(--dim); opacity: .65; }
 .composer.dropping { outline: 2px dashed var(--acc); outline-offset: -4px; }
 .drophint { position: absolute; top: -22px; left: 12px; font-size: 11px; background: var(--acc); color: #fff; padding: 2px 8px; border-radius: 3px; pointer-events: none; z-index: 5; }

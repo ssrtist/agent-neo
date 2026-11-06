@@ -40,6 +40,14 @@ GEMINI_STOP_SELECTORS = [
     "button.stop-button",
 ]
 
+GEMINI_ACTION_SELECTORS = [
+    'button[aria-label*="Copy" i]',
+    'button[aria-label*="Good response" i]',
+    'button[aria-label*="Bad response" i]',
+    'button[aria-label*="Modify response" i]',
+    'button[aria-label*="Share" i]',
+]
+
 GEMINI_MESSAGE_SELECTORS = [
     "model-response message-content",
     "message-content",
@@ -225,6 +233,34 @@ class GeminiWebDriver(web.WebCopilotDriver):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _has_action_bar(self, page, target_bubble) -> bool:
+        """Check if Gemini response action buttons (Copy, Good response, Share) are visible."""
+        if target_bubble is not None and hasattr(target_bubble, "locator"):
+            for sel in GEMINI_ACTION_SELECTORS[:2]:
+                try:
+                    btn = target_bubble.locator(sel).first
+                    if btn.is_visible():
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    btn = target_bubble.locator(
+                        f"xpath=ancestor-or-self::model-response//{sel.replace('button', '')}"
+                    ).first
+                    if btn.is_visible():
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+        if hasattr(page, "locator"):
+            for sel in GEMINI_ACTION_SELECTORS[:2]:
+                try:
+                    btn = page.locator(sel).last
+                    if btn.is_visible():
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+        return False
+
     def _send_message(self, prompt: str, timeout_seconds: int, status_callback, cancel_check) -> str:
         page = self.connect()
         input_box = self.find_input()
@@ -343,19 +379,37 @@ class GeminiWebDriver(web.WebCopilotDriver):
             if not cleaned_text:
                 continue
 
-            if saw_stop_button and not generating and len(cleaned_text) > 0:
-                if status_callback:
-                    status_callback("Generation complete (Gemini Stop button disappeared).")
-                self._clear_composer(page, input_box)
-                return cleaned_text
+            has_action = self._has_action_bar(page, target_bubble)
 
-            if cleaned_text == last_seen_text and not generating:
-                stable_count += 1
-                if stable_count >= 3:
+            is_valid_json = False
+            try:
+                import neo_core
+                neo_core.parse_action(cleaned_text)
+                is_valid_json = True
+            except Exception:
+                pass
+
+            if not generating and len(cleaned_text) > 0:
+                # If action bar appeared and JSON is already valid/complete, generation & DOM are 100% complete
+                if has_action and is_valid_json:
                     if status_callback:
-                        status_callback("Generation complete (Gemini text stabilized).")
+                        status_callback("Generation complete (Gemini action bar visible & JSON valid).")
                     self._clear_composer(page, input_box)
                     return cleaned_text
+
+                if cleaned_text == last_seen_text:
+                    stable_count += 1
+                    # With action bar: 1 stable cycle (1s) settles any trailing token;
+                    # Without action bar: require 2 cycles for valid JSON, 3 cycles otherwise
+                    required_stable = 1 if has_action else (2 if is_valid_json else 3)
+                    if stable_count >= required_stable:
+                        if status_callback:
+                            status_callback("Generation complete (Gemini response stabilized).")
+                        self._clear_composer(page, input_box)
+                        return cleaned_text
+                else:
+                    last_seen_text = cleaned_text
+                    stable_count = 0
             else:
                 last_seen_text = cleaned_text
                 stable_count = 0

@@ -6,43 +6,44 @@
   <!-- CSP as a meta tag: Tauri's config-level CSP panics under pytauri-wheel 0.8.0 (it needs build-time codegen).
        Nothing remote may load: model output cannot beacon data out through images, CSS or fetch (code review r1). -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" />
-  <title>Agent Neo (agent-neo)</title>
+  <title>Agent Neo</title>
   <link rel="stylesheet" href="app.css" />
   <script src="theme-boot.js"></script>
 </head>
 <body>
   <header class="convhead">
-    <span class="title" id="title">Agent Neo (agent-neo)</span>
-    <span class="fake" id="fake" hidden>FAKE BACKEND</span>
+    <div class="brand-wrap">
+      <span class="title" id="title">Agent Neo</span>
+      <span class="subtitle" id="subtitle">Open and free agent harness for all LLM web chats</span>
+      <span class="fake" id="fake" hidden>FAKE BACKEND</span>
+    </div>
+    <div class="ws-wrap" title="Workspace folder (click to browse)">
+      <span class="lbl">workspace</span>
+      <button type="button" id="ws-pill" class="ws-pill" data-testid="workspace" title="Click to browse workspace folder"></button>
+      <button type="button" id="ws-browse" class="mini ws-browse" title="Browse workspace folder">...</button>
+    </div>
     <label title="Chat backend">backend
       <select id="backend" data-testid="backend"></select></label>
-    <label title="Workspace folder (Enter to switch)">workspace
-      <input id="workspace" class="ws" data-testid="workspace" spellcheck="false" /></label>
     <label title="Browser mode for the web backend (applies to the next fresh browser)">browser
       <select id="browser-mode" data-testid="browser-mode"></select></label>
-    <span class="spacer"></span>
     <label title="Colour theme (saved on this machine)">theme
       <select id="theme-toggle" data-testid="theme-toggle">
         <option value="dark-high-contrast">Dark High Contrast</option>
-        <option value="dark">Dark</option>
         <option value="light">Light</option>
+        <option value="dayfox">Dayfox</option>
       </select></label>
     <div class="zoom-control" role="group" aria-label="Chat content zoom">
       <button type="button" class="mini" id="zoom-out" data-testid="zoom-out" title="Zoom out (Ctrl+-)" aria-label="Zoom out">-</button>
       <span class="zoom-level" id="zoom-level" data-testid="zoom-level">100%</span>
       <button type="button" class="mini" id="zoom-in" data-testid="zoom-in" title="Zoom in (Ctrl++ or Ctrl+=)" aria-label="Zoom in">+</button>
     </div>
-    <button class="mini" id="thinking" data-testid="thinking" title="Show the model's thinking lines">thinking</button>
-    <button class="mini" id="yolo" data-testid="yolo" title="Auto-approve tool calls">yolo</button>
-    <button class="mini" id="settings" title="Open neo.toml in your editor">settings</button>
-    <button class="mini" id="reload" title="Reload neo.toml">reload</button>
-    <button class="mini" id="new-chat" data-testid="new-chat" title="Start a new chat conversation (/new)">new chat</button>
   </header>
   <div class="settings-err" id="settings-err" data-testid="settings-error" hidden></div>
   <main class="conv" id="conv" data-testid="conversation">
     <div class="welcome" id="welcome">
       <h2>Agent Neo</h2>
-      <p>Ask for something in your workspace. The agent works through Copilot, Gemini, or DeepSeek and asks before it runs
+      <p class="tagline">Open and free agent harness for all LLM web chats</p>
+      <p>Ask for something in your workspace. The agent works through Copilot, Gemini, or WhatsApp and asks before it runs
         anything. Slash commands: <code>/new</code>, <code>/fresh</code>, <code>/workspace</code>, <code>/backend</code>,
         <code>/steps</code>, <code>/yolo</code>, <code>/skills</code>.</p>
     </div>
@@ -50,11 +51,22 @@
   <footer class="composer" id="composer" data-testid="composer">
     <div class="chips" id="chips" data-testid="chips"></div>
     <textarea id="prompt" data-testid="prompt" rows="3" spellcheck="true"
-      placeholder="Message the agent (Enter sends, Shift+Enter for a new line; drop links or files here)"></textarea>
-    <div class="crow">
-      <span class="hint" id="hint"></span>
-      <button id="stop" class="danger" data-testid="stop" hidden>Stop</button>
-      <button id="send" class="primary" data-testid="send">Send</button>
+      placeholder="Message the agent (Enter sends, Shift+Enter for new line, Ctrl+Enter for steering; drop links or files here)"></textarea>
+    <div class="toolbelt">
+      <div class="toolbelt-left">
+        <button type="button" class="mini" id="new-chat" data-testid="new-chat" title="Start a new chat conversation (/new)">new chat</button>
+        <button type="button" class="mini" id="reload" title="Reload neo.toml">reload</button>
+        <button type="button" class="mini" id="settings" title="Open neo.toml in your editor">settings</button>
+        <button type="button" class="mini" id="thinking" data-testid="thinking" title="Show the model's thinking lines">thinking</button>
+        <button type="button" class="mini" id="yolo" data-testid="yolo" title="Auto-approve tool calls">yolo</button>
+      </div>
+      <div class="toolbelt-center">
+        <span class="hint" id="hint"></span>
+      </div>
+      <div class="toolbelt-right">
+        <button type="button" id="stop" class="danger" data-testid="stop" hidden>Stop</button>
+        <button type="button" id="send" class="primary" data-testid="send">Send</button>
+      </div>
     </div>
   </footer>
   <script type="module" src="app.js"></script>

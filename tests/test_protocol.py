@@ -94,6 +94,41 @@ class ParseActionTests(unittest.TestCase):
         self.assertEqual(len(a["calls"]), 2)
         self.assertEqual(a["calls"][0]["name"], "list_dir")
 
+    def test_truncated_json_auto_repair(self) -> None:
+        # Turn 2 reproduction: unterminated string literal ending without closing quote and brace
+        trunc_final = '{"type":"final","message":"I am Gemini, a large language model built by Google, serving as the reasoning component for agent-neo.'
+        a = parse_action(trunc_final)
+        self.assertEqual(a["type"], "final")
+        self.assertTrue(a["message"].endswith("agent-neo."))
+
+        # Truncated tool call missing nested closing braces
+        trunc_tool = '{"type":"tool","name":"read_file","arguments":{"path":"src/app.py"'
+        b = parse_action(trunc_tool)
+        self.assertEqual(b["type"], "tool")
+        self.assertEqual(b["arguments"]["path"], "src/app.py")
+
+        # Truncated with trailing comma
+        trunc_comma = '{"type":"final","message":"all done",'
+        c = parse_action(trunc_comma)
+        self.assertEqual(c["type"], "final")
+        self.assertEqual(c["message"], "all done")
+
+    def test_salvage_write_file_with_unescaped_quotes(self) -> None:
+        raw = '{"thought":"Write game file","type":"tool","name":"write_file","arguments":{"path":"index.html","content":"<html lang="en">\n<div id="game"></div>\nconst keys = {};\n"}}'
+        act = parse_action(raw)
+        self.assertEqual(act["type"], "tool")
+        self.assertEqual(act["name"], "write_file")
+        self.assertEqual(act["arguments"]["path"], "index.html")
+        self.assertIn('<html lang="en">', act["arguments"]["content"])
+        self.assertIn('<div id="game">', act["arguments"]["content"])
+
+    def test_bare_object_without_action_type_raises(self) -> None:
+        # A broken string that contains an inner empty object like `const keys = {};`
+        # must NOT return `{}` as an action. It must raise ValueError / JSONDecodeError.
+        raw = 'some broken text {not json} const keys = {};'
+        with self.assertRaises(ValueError):
+            parse_action(raw)
+
     def test_tool_summary(self) -> None:
         self.assertEqual(tool_summary("run_shell", {"command": "Get-ChildItem\n -Name"}), "Get-ChildItem -Name")
         self.assertEqual(tool_summary("read_file", {"path": "a/b.txt"}), "a/b.txt")

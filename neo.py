@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent Neo (agent-neo / neo): a local coding agent driven by Copilot, Gemini, and DeepSeek.
+"""Agent Neo (agent-neo / neo): a local coding agent driven by Copilot, Gemini, and WhatsApp.
 
 This is the command-line renderer. The agent loop lives in neo_core.py and is shared
 with the GUI (neo_gui.py); this file only prints events and asks at the terminal.
@@ -7,13 +7,13 @@ with the GUI (neo_gui.py); this file only prints events and asks at the terminal
 Supports multiple backends:
   - copilot  : Controls M365 Copilot (https://m365.cloud.microsoft/chat) or Consumer Copilot (https://copilot.microsoft.com) in Edge via Playwright over CDP (default; alias: web)
   - gemini   : Controls Google Gemini (https://gemini.google.com/app) in Edge via Playwright over CDP
-  - deepseek : Controls DeepSeek Web Chat (https://chat.deepseek.com/) in Edge via Playwright over CDP
+  - whatsapp : Controls WhatsApp Web (https://web.whatsapp.com/send/?phone=...) in Edge via Playwright over CDP
   - desktop  : Controls M365Copilot.exe / Copilot.exe desktop app via UI Automation (pywinauto)
   - auto     : Automatically detects running desktop app, falling back to copilot web
   - custom   : Controls any web chat page (custom_url) with a pre-harness checklist
 
 Usage:
-  python neo.py [--backend copilot|gemini|deepseek|desktop|auto|custom] [--workspace <dir>]
+  python neo.py [--backend copilot|gemini|whatsapp|desktop|auto|custom] [--workspace <dir>]
   python neo.py --version
 
 Version: see neo_version.py (single source of truth).
@@ -42,7 +42,7 @@ from neo_events import Cancelled, SessionLog, dedupe_status, fanout
 from neo_settings import BACKEND_ALIASES, BACKENDS, BROWSER_MODES, SettingsError, custom_options, load_settings, neo_home
 from neo_version import __version__, version_string  # noqa: F401
 
-WEB_BACKENDS = ("copilot", "web", "gemini", "deepseek", "auto", "custom")
+WEB_BACKENDS = ("copilot", "web", "gemini", "whatsapp", "auto", "custom")
 
 
 def _default_root() -> Path:
@@ -69,6 +69,8 @@ def make_driver(backend: str, settings: Any, new_session_only: bool, fake_script
     return get_driver(backend, new_session_only=new_session_only, port=settings.cdp_port,
                       browser_mode=settings.browser_mode, notify=notify,
                       profile_dir=getattr(settings, "browser_profile_path", "") or None,
+                      phone=getattr(settings, "whatsapp_phone", None),
+                      contact=getattr(settings, "whatsapp_contact", None),
                       custom=custom_options(settings))
 
 
@@ -186,7 +188,7 @@ class CliApprover:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="neo.py",
-        description=f"{version_string()}: local coding agent driving Copilot, Gemini, and DeepSeek",
+        description=f"{version_string()}: local coding agent driving Copilot, Gemini, and WhatsApp",
         epilog="Settings: neo.toml in the agent-neo home (NEO_HOME, default ~/.agent-neo) and in "
                "<workspace>/.agent-neo/. Command-line flags override both.",
     )
@@ -201,6 +203,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Workspace root path (default: NEO_ROOT, else current directory)")
     parser.add_argument("--custom-url", default=None, metavar="URL",
                         help="chat page for --backend custom (default: neo.toml [custom_backend] url)")
+    parser.add_argument("--whatsapp-phone", default=None, metavar="PHONE",
+                        help="Target phone number for --backend whatsapp (default: 19175123390)")
+    parser.add_argument("--whatsapp-contact", default=None, metavar="NAME",
+                        help="Optional contact display name for --backend whatsapp verification")
     parser.add_argument("--port", type=int, default=None, help="Edge CDP port for web backend (default: 9365)")
     parser.add_argument("--step-chunk", type=int, default=None,
                         help=f"Dynamic threshold of sequential tool steps before pausing (default: {DEFAULT_STEP_CHUNK})")
@@ -225,6 +231,8 @@ def cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "browser_mode": args.browser_mode,
         "cdp_port": args.port,
         "custom_url": args.custom_url,
+        "whatsapp_phone": args.whatsapp_phone,
+        "whatsapp_contact": args.whatsapp_contact,
         "step_chunk": args.step_chunk,
         "hard_ceiling": args.hard_ceiling,
         "auto_approve": args.yolo,
@@ -278,7 +286,7 @@ def main() -> None:
     agent = Agent(driver, ROOT, settings, sink, CliApprover())
     print(f"Discovered {len(agent.skills)} skills: {', '.join(agent.skills.keys()) if agent.skills else 'none'}")
     print(f"Active backend: {driver.__class__.__name__}")
-    print("Commands: /new, /fresh, /backend <copilot|gemini|deepseek|desktop|auto|custom>, /workspace [path], /skills, /steps [N], /yolo, /quit")
+    print("Commands: /new, /fresh, /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /workspace [path], /skills, /steps [N], /yolo, /quit")
 
     try:
         while True:
@@ -381,7 +389,7 @@ def main() -> None:
                     except Exception as exc:
                         print(f"Failed to switch backend: {exc}")
                 else:
-                    print("Usage: /backend <copilot|gemini|deepseek|desktop|auto|custom>")
+                    print("Usage: /backend <copilot|gemini|whatsapp|desktop|auto|custom>")
                 continue
 
             run_turn_with_ctrl_c(agent, user_text)

@@ -53,7 +53,7 @@ REPO = Path(__file__).resolve().parent
 GUI_DIR = REPO / "gui"
 TAURI_DIR = REPO / "tauri"
 EVENT_CHANNEL = "neo:event"
-WEB_BACKENDS = ("copilot", "web", "gemini", "deepseek", "auto", "custom")
+WEB_BACKENDS = ("copilot", "web", "gemini", "whatsapp", "auto", "custom")
 
 # open_external: workspace files of these (document-like) types open with their default app directly; every other
 # type asks first (code review r1: a denylist missed .chm/.msc/... that run code when opened). Reveal never asks.
@@ -112,6 +112,7 @@ class GuiSession:
         self.show_thinking = False
         self.running = False
         self.busy = ""                    # a non-turn job in progress (fresh, backend switch)
+        self.queued_prompt: str | None = None
         self.driver: Any = None
         self.agent: Agent | None = None
         self.pending: dict[str, PendingApproval] = {}
@@ -244,13 +245,30 @@ class GuiSession:
             return self.slash(text)
         with self.lock:
             if self.running or self.busy:
-                return {"ok": False, "error": "busy"}
+                self.queued_prompt = text
+                self.notice(f"Prompt queued for next turn: {text[:60]}{'…' if len(text) > 60 else ''}")
+                return {"ok": True, "queued": True}
             if self.settings_error:
                 return {"ok": False, "error": "settings", "message": self.settings_error}
             self.running = True
         self.jobs.put(("turn", text))
         self.push_state()
         return {"ok": True}
+
+    def steer(self, text: str) -> dict[str, Any]:
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        with self.lock:
+            if not self.running:
+                return self.send(f"[Steering]: {text}")
+            agent = self.agent
+        if agent is not None:
+            agent.pending_steering = text
+            agent.cancel.set()
+        self.queued_prompt = f"[Steering]: {text}"
+        self.notice(f"Steering intervention received: {text[:60]}{'…' if len(text) > 60 else ''}")
+        return {"ok": True, "steered": True}
 
     def cancel(self) -> dict[str, Any]:
         with self.lock:
@@ -268,6 +286,35 @@ class GuiSession:
         self.jobs.put(job)
         self.push_state()
         return {"ok": True}
+
+    def browse_workspace(self) -> dict[str, Any]:
+        """Open a native Windows folder picker dialog and set the workspace."""
+        import tkinter as tk
+        from tkinter import filedialog
+
+        selected = None
+
+        def _pick():
+            nonlocal selected
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                selected = filedialog.askdirectory(
+                    initialdir=str(self.workspace),
+                    title="Select Agent Neo Workspace Folder",
+                )
+                root.destroy()
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_pick)
+        t.start()
+        t.join(timeout=120)
+
+        if selected and os.path.isdir(selected):
+            return self.set_workspace(selected)
+        return {"ok": False, "cancelled": True}
 
     def set_workspace(self, path: str) -> dict[str, Any]:
         target = Path(os.path.expandvars(path.strip().strip('"').strip("'"))).expanduser()
@@ -425,7 +472,7 @@ class GuiSession:
         if cmd == "/backend":
             norm = BACKEND_ALIASES.get(arg.lower(), arg.lower())
             if norm not in BACKENDS:
-                self.notice("Usage: /backend <copilot|gemini|deepseek|desktop|auto|custom>", "warn")
+                self.notice("Usage: /backend <copilot|gemini|whatsapp|desktop|auto|custom>", "warn")
                 return {"ok": False}
             return self.set_backend(norm)
         if cmd == "/steps":
@@ -445,7 +492,7 @@ class GuiSession:
             skills = self.agent.skills if self.agent else discover_skills(self.workspace)
             self.notice(f"Skills ({len(skills)}): " + (", ".join(skills) or "none"))
             return {"ok": True}
-        self.notice("Commands: /new, /fresh, /workspace [path], /backend <copilot|gemini|deepseek|desktop|auto|custom>, /steps [N], /yolo, /skills",
+        self.notice("Commands: /new, /fresh, /workspace [path], /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /steps [N], /yolo, /skills",
                     "info" if cmd == "/help" else "warn")
         return {"ok": cmd == "/help"}
 
@@ -463,6 +510,8 @@ class GuiSession:
         drv = get_driver(backend, new_session_only=not fresh, port=self.settings.cdp_port,
                          browser_mode=self.browser_mode, notify=self._notify_driver,
                          profile_dir=self.settings.browser_profile_path or None,
+                         phone=getattr(self.settings, "whatsapp_phone", None),
+                         contact=getattr(self.settings, "whatsapp_contact", None),
                          custom=custom_options(self.settings))
         if type(drv).__name__ == "DesktopCopilotDriver":
             self.notice("Desktop backend: it takes the keyboard focus and the clipboard while it works. "
@@ -528,6 +577,11 @@ class GuiSession:
                 with self.lock:
                     if kind == "turn":
                         self.running = False
+                        if self.queued_prompt:
+                            next_p = self.queued_prompt
+                            self.queued_prompt = None
+                            self.running = True
+                            self.jobs.put(("turn", next_p))
                     else:
                         self.busy = ""
                 if kind != "shutdown":
@@ -631,6 +685,15 @@ def main(argv: list[str] | None = None) -> int:
     async def send(body: Body, app_handle: AppHandle) -> Body:
         bind(app_handle)
         return Body(session.send(str(body_dict(body).get("text", ""))))
+
+    @commands.command()
+    async def steer(body: Body, app_handle: AppHandle) -> Body:
+        bind(app_handle)
+        return Body(session.steer(str(body_dict(body).get("text", ""))))
+
+    @commands.command()
+    async def browse_workspace(body: Body, app_handle: AppHandle) -> Body:
+        return Body(session.browse_workspace())
 
     @commands.command()
     async def cancel(body: Body, app_handle: AppHandle) -> Body:

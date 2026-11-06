@@ -37,7 +37,7 @@ class CliTests(unittest.TestCase):
 
     def test_help_shows_default_copilot_and_browser_mode(self) -> None:
         out = run_cli(["--help"], env=self.env).stdout
-        self.assertIn("--backend {copilot,gemini,deepseek,desktop,auto,custom,web}", out)
+        self.assertIn("--backend {copilot,gemini,whatsapp,desktop,auto,custom,web}", out)
         self.assertIn("default: copilot", out)
         self.assertIn("--browser-mode {offscreen,visible,headless}", out)
         self.assertNotIn("default: auto", out)
@@ -73,7 +73,7 @@ class CliTests(unittest.TestCase):
             "Current limits: safety chunk = 3 steps, ceiling = 255 steps.",
             "[yolo] YOLO mode ENABLED (auto-approving all tools)",
             f"Current workspace: {self.ws.resolve()}",
-            "Commands: /new, /fresh, /backend <copilot|gemini|deepseek|desktop|auto|custom>, /workspace [path], /skills, /steps [N], /yolo, /quit",
+            "Commands: /new, /fresh, /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /workspace [path], /skills, /steps [N], /yolo, /quit",
             "Exiting agent-neo...",
         ):
             self.assertIn(expected, out)

@@ -1,9 +1,9 @@
-"""chat_driver.py — Unified driver abstraction for Copilot, Gemini, DeepSeek & Custom chat engines.
+"""chat_driver.py — Unified driver abstraction for Copilot, Gemini, WhatsApp & Custom chat engines.
 
 Provides a common interface supporting:
 1. 'copilot' — Controls M365 Copilot (https://m365.cloud.microsoft/chat) or Consumer Copilot (https://copilot.microsoft.com) in Edge via Playwright over CDP (also accepts alias 'web').
 2. 'gemini'  — Controls Google Gemini (https://gemini.google.com/app) in Edge via Playwright over CDP.
-3. 'deepseek'— Controls DeepSeek Web Chat (https://chat.deepseek.com/) in Edge via Playwright over CDP.
+3. 'whatsapp'— Controls WhatsApp Web (https://web.whatsapp.com/send/?phone=...) in Edge via Playwright over CDP.
 4. 'desktop' — Controls M365Copilot.exe / Copilot.exe via Windows UI Automation (pywinauto).
 5. 'auto'    — Automatically detects running desktop app, falling back to Copilot web automation.
 6. 'custom'  — Any web chat page (custom_url), with a pre-harness checklist (custom_driver.py).
@@ -45,7 +45,7 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
     """Factory to acquire the requested ChatDriver.
 
     Args:
-        backend: 'copilot' (or 'web'), 'gemini', 'deepseek', 'desktop', 'auto' or 'custom'.
+        backend: 'copilot' (or 'web'), 'gemini', 'whatsapp', 'desktop', 'auto' or 'custom'.
         custom: for 'custom': url, input_selector, send_selector, bubble_selector.
         new_session_only: If True, reuses existing browser instance and only starts a new
                           chat conversation.
@@ -90,9 +90,9 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
                 pass
         return driver
 
-    if selected == "deepseek":
-        from deepseek_web import DeepSeekWebDriver
-        driver = DeepSeekWebDriver(force_fresh=force_fresh, **web_kwargs, **kwargs)
+    if selected == "whatsapp":
+        from whatsapp_web import WhatsAppWebDriver
+        driver = WhatsAppWebDriver(force_fresh=force_fresh, **web_kwargs, **kwargs)
         if new_session_only:
             try:
                 driver.new_conversation()
@@ -135,5 +135,5 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
         return CustomWebCopilotDriver(url, force_fresh=force_fresh, **opts, **web_kwargs)
 
     raise ValueError(
-        f"Unknown backend {backend!r}. Choose from: 'copilot', 'gemini', 'deepseek', 'desktop', 'auto', 'custom'."
+        f"Unknown backend {backend!r}. Choose from: 'copilot', 'gemini', 'whatsapp', 'desktop', 'auto', 'custom'."
     )

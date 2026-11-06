@@ -591,7 +591,7 @@ class Run:
         page.evaluate("localStorage.removeItem('neo.theme')")   # leave the scratch profile at the default
         # ---- v0.5 D5: the backend dropdown offers the custom web backend
         bk = page.evaluate("[...document.querySelectorAll('#backend option')].map(o => o.value)")
-        self.check('backend dropdown includes custom and deepseek', 'custom' in bk and 'copilot' in bk and 'deepseek' in bk, str(bk))
+        self.check('backend dropdown includes custom and whatsapp', 'custom' in bk and 'copilot' in bk and 'whatsapp' in bk, str(bk))
 
         self.check("no page errors", not errors, "; ".join(errors)[:300])
 

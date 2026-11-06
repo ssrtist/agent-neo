@@ -99,7 +99,7 @@ You cannot start further sub-agents.
 
 APPROVAL_TOOLS = {"write_file", "edit_file", "delete_file", "run_shell"}
 _ACTION_TYPES = ("tool", "tools", "final")
-_UI_PREFIX_RE = re.compile(r"^\s*(?:Copilot said:|Gemini said:?|Model said:?|DeepSeek said:?)\s*", re.I)
+_UI_PREFIX_RE = re.compile(r"^\s*(?:Copilot said:|Gemini said:?|Model said:?|WhatsApp said:?)\s*", re.I)
 _THOUGHT_MAX = 500
 
 
@@ -122,6 +122,57 @@ def _scan_objects(text: str, base: int = 0):
         i = text.find("{", end)
 
 
+def repair_truncated_json(text: str) -> str | None:
+    """Attempt to balance unclosed quotes, braces, and brackets from truncated model output."""
+    if not text or "{" not in text:
+        return None
+    start = text.find("{")
+    sub = text[start:].strip()
+    sub = re.sub(r"\s*```+\s*$", "", sub)
+
+    in_string = False
+    escape = False
+    stack: list[str] = []
+
+    for ch in sub:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch in "{[":
+                stack.append(ch)
+            elif ch == "}":
+                if stack and stack[-1] == "{":
+                    stack.pop()
+            elif ch == "]":
+                if stack and stack[-1] == "[":
+                    stack.pop()
+
+    suffix = '"' if in_string else ""
+    work = sub + suffix
+
+    for open_ch in reversed(stack):
+        work = re.sub(r",\s*$", "", work)
+        if open_ch == "{":
+            work += "}"
+        elif open_ch == "[":
+            work += "]"
+
+    try:
+        obj = json.loads(work)
+        if isinstance(obj, dict):
+            return work
+    except Exception:
+        pass
+    return None
+
+
 def _preamble_thought(action: Any, preamble: str) -> Any:
     """Plan v0.5 D2: conversational text before the JSON becomes the thought when the JSON has none."""
     pre = re.sub(r"\s+", " ", _UI_PREFIX_RE.sub("", preamble)).strip().rstrip(":").strip()
@@ -130,11 +181,86 @@ def _preamble_thought(action: Any, preamble: str) -> Any:
     return action
 
 
+def _salvage_tool_call(text: str) -> dict[str, Any] | None:
+    """Attempt to salvage write_file or edit_file calls when models emit raw unescaped quotes in content/new."""
+    if not text:
+        return None
+    if '"write_file"' not in text and '"edit_file"' not in text:
+        return None
+
+    m_type = re.search(r'"type"\s*:\s*"(tool)"', text)
+    m_name = re.search(r'"name"\s*:\s*"(write_file|edit_file)"', text)
+    if not m_type or not m_name:
+        return None
+
+    tool_name = m_name.group(1)
+
+    m_path = re.search(r'"path"\s*:\s*"([^"\r\n]+)"', text)
+    if not m_path:
+        return None
+    file_path = m_path.group(1)
+
+    m_thought = re.search(r'"thought"\s*:\s*"([^"\r\n]+)"', text)
+    thought_val = m_thought.group(1) if m_thought else ""
+
+    if tool_name == "write_file":
+        m_content = re.search(r'"content"\s*:\s*"(.*)"\s*\}\s*\}', text, re.S)
+        if not m_content:
+            m_content = re.search(r'"content"\s*:\s*"(.*)"\s*\}\s*$', text, re.S)
+        if not m_content:
+            return None
+        raw_content = m_content.group(1)
+        try:
+            escaped = re.sub(r'(?<!\\)"', r'\"', raw_content)
+            escaped = escaped.replace("\r\n", "\\n").replace("\n", "\\n")
+            content_val = json.loads('"' + escaped + '"')
+        except Exception:
+            content_val = (
+                raw_content.replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+            )
+        res: dict[str, Any] = {
+            "type": "tool",
+            "name": "write_file",
+            "arguments": {"path": file_path, "content": content_val},
+        }
+        if thought_val:
+            res["thought"] = thought_val
+        return res
+
+    if tool_name == "edit_file":
+        m_old = re.search(r'"old"\s*:\s*"(.*?)"\s*,\s*"new"', text, re.S)
+        m_new = re.search(r'"new"\s*:\s*"(.*)"\s*\}\s*\}', text, re.S)
+        if not m_new:
+            m_new = re.search(r'"new"\s*:\s*"(.*)"\s*\}\s*$', text, re.S)
+        if m_old and m_new:
+            try:
+                old_val = json.loads('"' + re.sub(r'(?<!\\)"', r'\"', m_old.group(1)).replace("\r\n", "\\n").replace("\n", "\\n") + '"')
+            except Exception:
+                old_val = m_old.group(1).replace("\\n", "\n").replace('\\"', '"')
+            try:
+                new_val = json.loads('"' + re.sub(r'(?<!\\)"', r'\"', m_new.group(1)).replace("\r\n", "\\n").replace("\n", "\\n") + '"')
+            except Exception:
+                new_val = m_new.group(1).replace("\\n", "\n").replace('\\"', '"')
+            res = {
+                "type": "tool",
+                "name": "edit_file",
+                "arguments": {"path": file_path, "old": old_val, "new": new_val},
+            }
+            if thought_val:
+                res["thought"] = thought_val
+            return res
+
+    return None
+
+
 def parse_action(text: str) -> Any:
     """Extract the action JSON object of a reply (fenced or bare). Raises ValueError when there is none.
 
     Order (plan v0.5 D2): fenced ```json blocks, then balanced bare objects; the first object whose
-    "type" is tool/final wins, else the first object at all. Text before it becomes "thought".
+    "type" is tool/final wins. Text before it becomes "thought".
     """
     src = text or ""
     candidates: list[tuple[int, Any]] = []
@@ -142,15 +268,24 @@ def parse_action(text: str) -> Any:
         candidates.extend((m.start(), obj) for _s, obj in _scan_objects(m.group(1)))
     if not any(isinstance(o, dict) and o.get("type") in _ACTION_TYPES for _s, o in candidates):
         candidates.extend(_scan_objects(src))
-    if not candidates:
-        # keep the old error shape: json's own message for a broken object
-        stripped = src.strip()
-        start = stripped.find("{")
-        return json.loads(stripped[start:] if start >= 0 else stripped)
+    if not any(isinstance(o, dict) and o.get("type") in _ACTION_TYPES for _s, o in candidates):
+        repaired = repair_truncated_json(src)
+        if repaired:
+            candidates.extend(_scan_objects(repaired))
+
     for start, obj in candidates:
-        if obj.get("type") in _ACTION_TYPES:
-            return _preamble_thought(obj, src[:start])
-    return candidates[0][1]
+        if isinstance(obj, dict):
+            if obj.get("type") in _ACTION_TYPES:
+                return _preamble_thought(obj, src[:start])
+
+    salvaged = _salvage_tool_call(src)
+    if salvaged:
+        return salvaged
+
+    # keep the old error shape: json's own message for a broken object
+    stripped = src.strip()
+    start = stripped.find("{")
+    return json.loads(stripped[start:] if start >= 0 else stripped)
 
 
 def build_system_prompt(
@@ -240,8 +375,8 @@ def discover_skills(root: Path, backend: str = "copilot") -> dict[str, dict[str,
     elif b == "gemini":
         user_engine_dirs.append(home / ".gemini" / "skills")
         user_engine_dirs.append(home / ".antigravity" / "skills")
-    elif b == "deepseek":
-        user_engine_dirs.append(home / ".deepseek" / "skills")
+    elif b == "whatsapp":
+        user_engine_dirs.append(home / ".whatsapp" / "skills")
 
     # Agent Neo own user skills
     user_engine_dirs.extend([
@@ -249,12 +384,12 @@ def discover_skills(root: Path, backend: str = "copilot") -> dict[str, dict[str,
         home / ".neo" / "skills",
     ])
 
-    # Fallback engines in order: copilot -> gemini -> deepseek -> others
+    # Fallback engines in order: copilot -> gemini -> whatsapp -> others
     all_fallback = [
         home / ".copilot" / "skills",
         home / ".gemini" / "skills",
         home / ".antigravity" / "skills",
-        home / ".deepseek" / "skills",
+        home / ".whatsapp" / "skills",
         home / ".claude" / "skills",
         home / ".agents" / "skills",
     ]
@@ -837,6 +972,7 @@ class Agent:
         self._custom = read_custom_instructions(settings)
         self.task_manager = TaskManager(self.root)
         self._compact_checkpoint = ""
+        self.pending_steering: str | None = None
 
     # ---- plumbing
 
@@ -1113,6 +1249,10 @@ class Agent:
                         parts.append("\nNOTE: Remaining tools in the batch were NOT executed because a preceding tool failed or was denied.\n")
                     parts.append("\nReturn the next tool call or final response as one JSON object.")
                     prompt = "\n".join(parts)
+                if self.pending_steering:
+                    steer_note = self.pending_steering
+                    self.pending_steering = None
+                    prompt = f"[User Steering Intervention]: {steer_note}\n\n{prompt}"
                 if self._context_lost:
                     # Desktop/generic backends cannot return to the parent conversation after a sub-agent.
                     self._context_lost = False

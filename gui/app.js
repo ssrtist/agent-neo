@@ -43,12 +43,20 @@ function applyState(s) {
   const thinkingChanged = s.show_thinking !== st.show_thinking;
   const wsChanged = s.workspace !== st.workspace;
   st = s;
-  document.title = s.title || document.title;
-  $('title').textContent = s.title || 'Agent Neo';
+  document.title = 'Agent Neo';
+  $('title').textContent = 'Agent Neo';
   $('fake').hidden = !s.fake;
   fillSelect($('backend'), s.backends, s.backend);
   fillSelect($('browser-mode'), s.browser_modes, s.browser_mode);
-  if (document.activeElement !== $('workspace') || wsChanged) $('workspace').value = s.workspace;
+  if ($('workspace') && (document.activeElement !== $('workspace') || wsChanged)) {
+    $('workspace').value = s.workspace;
+  }
+  const wsPill = $('ws-pill');
+  if (wsPill) {
+    const wsName = s.workspace ? s.workspace.replace(/^.*[\\/]/, '') || s.workspace : 'Select folder...';
+    wsPill.textContent = wsName;
+    wsPill.title = s.workspace ? `Workspace: ${s.workspace}\n(Click to browse folder)` : 'Click to browse folder';
+  }
   $('thinking').classList.toggle('on', !!s.show_thinking);
   $('thinking').setAttribute('aria-pressed', String(!!s.show_thinking));
   $('yolo').classList.toggle('on', !!s.yolo);
@@ -58,10 +66,10 @@ function applyState(s) {
   err.textContent = s.settings_error ? `Settings error (fix the file, then reload): ${s.settings_error}` : '';
   // startup settings warnings (later loads push them as notices from Python); shown once
   if (!shownStartupWarnings) { shownStartupWarnings = true; for (const w of s.settings_warnings || []) notice(w, 'warn'); }
-  const busy = s.running || !!s.busy;
+  const busy = !!s.busy;
   $('send').disabled = busy;
   $('stop').hidden = !s.running;
-  $('hint').textContent = s.busy ? s.busy + '…' : s.running ? 'Working… (Stop ends the turn)' : '';
+  $('hint').textContent = s.busy ? s.busy + '…' : s.running ? 'Working… (Enter queues, Ctrl+Enter steers, Stop ends turn)' : '';
   if (thinkingChanged) for (const id of turnEls.keys()) renderTurn(id);
 }
 
@@ -399,29 +407,121 @@ function insertAtCaret(text) {
   ta.setSelectionRange(p, p);
 }
 
+// ------------------------------------------------------------------ prompt history
+const HISTORY_KEY = 'neo.promptHistory';
+const HISTORY_MAX = 100;
+function loadPromptHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+const promptHistory = loadPromptHistory();
+let historyIndex = -1;
+let currentDraft = '';
+
+function pushPromptHistory(prompt) {
+  const clean = (prompt || '').trim();
+  if (!clean) return;
+  if (promptHistory.length > 0 && promptHistory[promptHistory.length - 1] === clean) return;
+  promptHistory.push(clean);
+  if (promptHistory.length > HISTORY_MAX) promptHistory.shift();
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(promptHistory));
+  } catch { /* ignore storage errors */ }
+  historyIndex = -1;
+  currentDraft = '';
+}
+
 // ------------------------------------------------------------------ composer
 async function send() {
-  if (st.running || st.busy) return;
+  if (st.busy) return;
   const raw = ta.value;
   const isSlash = raw.trim().startsWith('/');
   const text = isSlash ? raw.trim() : expandDraft(raw, chips);
   if (!text) return;
+  pushPromptHistory(raw);
   const sentChips = isSlash ? [] : chips.slice();
   let r;
   try { r = await invoke('send', { text }); } catch (err) { return notice(`send failed: ${err}`, 'error'); }
-  // clear only what was sent: the user may already be typing the next prompt when the reply arrives
+  const clearSent = () => {
+    if (ta.value === raw) ta.value = '';
+    if (sentChips.length) { chips = chips.filter((c) => !sentChips.includes(c)); renderChips(); }
+  };
+  if (r && r.ok) {
+    clearSent();
+    if (r.queued) {
+      notice(`Queued prompt for next turn: ${text.slice(0, 80)}`, 'info');
+    }
+  }
+  else if (r && r.error === 'settings') notice(`Not sent: fix the settings file first. ${r.message || ''}`, 'error');
+  else if (r && r.error === 'busy') notice('Not sent: the agent is busy.', 'warn');
+  else if (isSlash && ta.value === raw) ta.value = '';
+  ta.focus();
+}
+
+async function steer() {
+  if (st.busy) return;
+  const raw = ta.value;
+  const isSlash = raw.trim().startsWith('/');
+  const text = isSlash ? raw.trim() : expandDraft(raw, chips);
+  if (!text) return;
+  pushPromptHistory(raw);
+  const sentChips = isSlash ? [] : chips.slice();
+  let r;
+  try { r = await invoke('steer', { text }); } catch (err) { return notice(`steer failed: ${err}`, 'error'); }
   const clearSent = () => {
     if (ta.value === raw) ta.value = '';
     if (sentChips.length) { chips = chips.filter((c) => !sentChips.includes(c)); renderChips(); }
   };
   if (r && r.ok) clearSent();
   else if (r && r.error === 'settings') notice(`Not sent: fix the settings file first. ${r.message || ''}`, 'error');
-  else if (r && r.error === 'busy') notice('Not sent: the agent is busy.', 'warn');
-  else if (isSlash && ta.value === raw) ta.value = '';
   ta.focus();
 }
+
 ta.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    steer();
+    return;
+  }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    send();
+    return;
+  }
+  if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+    const isFirstLine = ta.selectionStart === 0 || !ta.value.slice(0, ta.selectionStart).includes('\n');
+    if (isFirstLine && promptHistory.length > 0) {
+      if (historyIndex === -1) {
+        currentDraft = ta.value;
+        historyIndex = promptHistory.length - 1;
+      } else if (historyIndex > 0) {
+        historyIndex--;
+      }
+      ta.value = promptHistory[historyIndex];
+      focusEnd();
+      e.preventDefault();
+    }
+    return;
+  }
+  if (e.key === 'ArrowDown' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+    const isLastLine = ta.selectionEnd === ta.value.length || !ta.value.slice(ta.selectionEnd).includes('\n');
+    if (isLastLine && historyIndex !== -1) {
+      if (historyIndex < promptHistory.length - 1) {
+        historyIndex++;
+        ta.value = promptHistory[historyIndex];
+      } else {
+        historyIndex = -1;
+        ta.value = currentDraft;
+      }
+      focusEnd();
+      e.preventDefault();
+    }
+    return;
+  }
 });
 $('send').onclick = send;
 $('stop').onclick = () => invoke('cancel');
@@ -429,10 +529,14 @@ $('stop').onclick = () => invoke('cancel');
 // ------------------------------------------------------------------ header
 $('backend').onchange = (e) => invoke('set_backend', { backend: e.target.value });
 $('browser-mode').onchange = (e) => invoke('set_option', { browser_mode: e.target.value });
-$('workspace').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); invoke('set_workspace', { path: e.target.value }); }
-  if (e.key === 'Escape') { e.target.value = st.workspace; ta.focus(); }
-});
+if ($('ws-browse')) $('ws-browse').onclick = () => invoke('browse_workspace');
+if ($('ws-pill')) $('ws-pill').onclick = () => invoke('browse_workspace');
+if ($('workspace')) {
+  $('workspace').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); invoke('set_workspace', { path: e.target.value }); }
+    if (e.key === 'Escape') { e.target.value = st.workspace; ta.focus(); }
+  });
+}
 $('thinking').onclick = () => invoke('set_option', { show_thinking: !st.show_thinking });
 $('yolo').onclick = () => invoke('set_option', { yolo: !st.yolo });
 $('settings').onclick = () => invoke('open_settings');

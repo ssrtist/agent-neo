@@ -2,7 +2,7 @@
 // runs in <head> before first paint so the saved theme is on <html data-theme="..."> with no flash.
 (function () {
   var KEY = 'neo.theme';
-  var VALID = { 'dark-high-contrast': 1, dark: 1, light: 1 };
+  var VALID = { 'dark-high-contrast': 1, light: 1, dayfox: 1 };
   var DEF = 'dark-high-contrast';
   function pick(v) { return VALID[v] ? v : DEF; }
   function load() {

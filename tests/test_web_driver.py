@@ -115,7 +115,7 @@ class WebDriverTests(unittest.TestCase):
         self.assertTrue(d._own_page_url("https://copilot.microsoft.com/chats/123"))
         self.assertFalse(d._ready_url("https://login.live.com/oauth20_authorize.srf"))
         self.assertTrue(web._is_login_url("https://accounts.google.com/v3/signin"))
-        self.assertTrue(web._is_login_url("https://chat.deepseek.com/sign_in"))
+        self.assertTrue(web._is_login_url("https://login.microsoftonline.com/common/oauth2"))
 
 
 if __name__ == "__main__":

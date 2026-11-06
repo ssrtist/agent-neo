@@ -139,7 +139,6 @@ def _is_login_url(url: str) -> bool:
         or "login.live.com" in u
         or "login.microsoft.com" in u
         or "accounts.google.com" in u
-        or "chat.deepseek.com/sign_in" in u
     )
 
 
@@ -206,7 +205,7 @@ class WebCopilotDriver:
         self._edge_up = False       # ensure_cdp_browser returned: Edge is up on self.port
         self._cancel_check: Callable[[], bool] | None = None   # set for the duration of send_message
 
-    # URL hooks: M365 or Consumer Copilot chat by default; gemini_web.py, deepseek_web.py and custom_driver.py override them.
+    # URL hooks: M365 or Consumer Copilot chat by default; gemini_web.py, whatsapp_web.py and custom_driver.py override them.
     def _ready_url(self, url: str) -> bool:
         return _is_chat_url(url)
 

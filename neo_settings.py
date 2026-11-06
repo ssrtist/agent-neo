@@ -22,7 +22,7 @@ from typing import Any
 
 SETTINGS_FILE = "neo.toml"
 ALT_SETTINGS_FILE = "agent-neo.toml"
-BACKENDS = ("copilot", "gemini", "deepseek", "desktop", "auto", "custom")
+BACKENDS = ("copilot", "gemini", "whatsapp", "desktop", "auto", "custom")
 BACKEND_ALIASES = {"web": "copilot"}
 BROWSER_MODES = ("offscreen", "visible", "headless")
 
@@ -39,6 +39,8 @@ class Settings:
     custom_instructions_file: str = ""
     backend: str = "copilot"
     browser_mode: str = "offscreen"
+    whatsapp_phone: str = "19175123390"
+    whatsapp_contact: str = ""
     # agent-neo's dedicated CDP port and Edge profile.
     cdp_port: int = 9365
     browser_profile_dir: str = ""      # "" = %LOCALAPPDATA%\agent-neo-edge; env NEO_BROWSER_PROFILE / AGENT_NEO_BROWSER_PROFILE overrides
