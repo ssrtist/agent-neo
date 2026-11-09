@@ -25,3 +25,6 @@ dist/
 # Playwright & browser state
 .playwright/
 state/
+
+# macOS
+.DS_Store

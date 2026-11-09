@@ -108,7 +108,22 @@ def profile_pids(processes: Iterable[Proc], profile_dir: str) -> list[int]:
 
 
 def list_edge_processes() -> list[Proc]:
-    """Every msedge.exe with its command line (Windows, through CIM)."""
+    """Every msedge.exe with its command line (Windows, through CIM; POSIX via ps)."""
+    if os.name != "nt":
+        try:
+            out = subprocess.run(["ps", "-ax", "-o", "pid=,args="], capture_output=True, text=True, timeout=15).stdout
+        except Exception:  # noqa: BLE001
+            return []
+        procs: list[Proc] = []
+        for line in out.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2 or not parts[0].isdigit():
+                continue
+            pid, cmdline = int(parts[0]), parts[1]
+            lower = cmdline.lower()
+            if "microsoft edge" in lower or "google chrome" in lower or "msedge" in lower:
+                procs.append(Proc(pid, EDGE_PROCESS, cmdline))
+        return procs
     ps = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
           "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress")
     try:
@@ -126,6 +141,13 @@ def list_edge_processes() -> list[Proc]:
 
 def _stop_pids(pids: list[int]) -> None:
     if not pids:
+        return
+    if os.name != "nt":
+        for p in pids:
+            try:
+                os.kill(int(p), 9)
+            except Exception:  # noqa: BLE001
+                pass
         return
     ps = f"Stop-Process -Id {','.join(str(int(p)) for p in pids)} -Force -ErrorAction SilentlyContinue"
     try:

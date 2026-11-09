@@ -15,13 +15,16 @@ import inspect
 import json
 import os
 import re
+import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from html.parser import HTMLParser
 from dataclasses import replace
 from pathlib import Path
@@ -64,6 +67,7 @@ Additional tools & features:
 - web_fetch: {"type":"tool","name":"web_fetch","arguments":{"url":"http://localhost:3000/api","max_chars":8000}}
 - run_shell background: {"command":"...","background":true} returns task_id; inspect with read_task {"task_id":"..."} or terminate with kill_task {"task_id":"..."}
 - Batching: multiple tool calls can be combined in one turn via {"type":"tools","calls":[{"name":...,"arguments":...}, ...]}
+- When write_file or edit_file arguments contain HTML tags or Markdown characters (<, >, *, _), wrap your JSON response in a ```json ... ``` code block so the web chat UI does not strip tags or formatting.
 
 When finished:
 {"type":"final","message":"answer to the user"}
@@ -1077,10 +1081,43 @@ class Agent:
 
     # ---- turns
 
+    @staticmethod
+    def _session_host_label() -> str:
+        env_label = os.environ.get("NEO_HOST_LABEL", "").strip()
+        if env_label:
+            return env_label
+        if sys.platform == "darwin":
+            try:
+                out = subprocess.run(
+                    ["scutil", "--get", "ComputerName"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                ).stdout.strip()
+                if out:
+                    cleaned = re.sub(r"^.+?['’]s\s+", "", out, flags=re.IGNORECASE).strip()
+                    if cleaned:
+                        return cleaned.lower()
+            except Exception:
+                pass
+        host = socket.gethostname().strip()
+        if host.lower().endswith(".local"):
+            host = host[:-6]
+        host = re.sub(r"^[a-z0-9]+s-", "", host, flags=re.IGNORECASE)
+        return host.replace("-", " ").strip().lower() or "local"
+
+    def session_title_line(self, user_text: str) -> str:
+        date_str = datetime.now().strftime("%m-%d-%Y")
+        host = self._session_host_label()
+        summary = re.sub(r"\s+", " ", (user_text or "").strip())[:80]
+        return f"{date_str} {host}: {summary}".rstrip()
+
     def first_prompt(self, user_text: str) -> str:
-        base = f"{self.system_prompt()}\n\nUSER REQUEST:\n{user_text}"
+        title = self.session_title_line(user_text)
+        base = f"{title}\n\n{self.system_prompt()}\n\nUSER REQUEST:\n{user_text}"
         if self._compact_checkpoint:
             base = (
+                f"{title}\n\n"
                 f"{self.system_prompt()}\n\n"
                 "RESUMED FROM PREVIOUS COMPACTED CONVERSATION CHECKPOINT:\n"
                 f"{self._compact_checkpoint}\n\n"

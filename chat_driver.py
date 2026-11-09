@@ -59,6 +59,8 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
     force_fresh = kwargs.pop("force_fresh", not new_session_only)
     web_kwargs = {k: kwargs.pop(k) for k in ("port", "browser_mode", "notify", "url", "headless", "profile_dir") if k in kwargs}
     web_kwargs = {k: v for k, v in web_kwargs.items() if v is not None}
+    wa_kwargs = {k: kwargs.pop(k) for k in ("phone", "contact") if k in kwargs}
+    wa_kwargs = {k: v for k, v in wa_kwargs.items() if v is not None}
 
     if selected == "desktop":
         from copilot_ui import DesktopCopilotDriver
@@ -92,7 +94,7 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
 
     if selected == "whatsapp":
         from whatsapp_web import WhatsAppWebDriver
-        driver = WhatsAppWebDriver(force_fresh=force_fresh, **web_kwargs, **kwargs)
+        driver = WhatsAppWebDriver(force_fresh=force_fresh, **web_kwargs, **wa_kwargs, **kwargs)
         if new_session_only:
             try:
                 driver.new_conversation()

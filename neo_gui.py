@@ -288,29 +288,41 @@ class GuiSession:
         return {"ok": True}
 
     def browse_workspace(self) -> dict[str, Any]:
-        """Open a native Windows folder picker dialog and set the workspace."""
-        import tkinter as tk
-        from tkinter import filedialog
-
+        """Open a native folder picker dialog and set the workspace."""
         selected = None
 
-        def _pick():
-            nonlocal selected
+        if sys.platform == "darwin":
             try:
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-                selected = filedialog.askdirectory(
-                    initialdir=str(self.workspace),
-                    title="Select Agent Neo Workspace Folder",
+                script = (
+                    f'POSIX path of (choose folder with prompt "Select Agent Neo Workspace Folder" '
+                    f'default location POSIX file {json.dumps(str(self.workspace))})'
                 )
-                root.destroy()
+                res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+                if res.returncode == 0 and res.stdout.strip():
+                    selected = res.stdout.strip()
             except Exception:
                 pass
+        else:
+            import tkinter as tk
+            from tkinter import filedialog
 
-        t = threading.Thread(target=_pick)
-        t.start()
-        t.join(timeout=120)
+            def _pick():
+                nonlocal selected
+                try:
+                    root = tk.Tk()
+                    root.withdraw()
+                    root.attributes("-topmost", True)
+                    selected = filedialog.askdirectory(
+                        initialdir=str(self.workspace),
+                        title="Select Agent Neo Workspace Folder",
+                    )
+                    root.destroy()
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_pick)
+            t.start()
+            t.join(timeout=120)
 
         if selected and os.path.isdir(selected):
             return self.set_workspace(selected)
@@ -402,7 +414,10 @@ class GuiSession:
             if scheme not in SAFE_SCHEMES:
                 self.notice(f"Not opened: only http, https and mailto links open from agent-neo ({target[:120]}).", "warn")
                 return {"ok": False, "error": "scheme"}
-            return self._launch({"kind": "url", "target": target}, lambda: os.startfile(target))  # noqa: S606
+            return self._launch(
+                {"kind": "url", "target": target},
+                lambda: os.startfile(target) if hasattr(os, "startfile") else subprocess.Popen(["open", target]),  # noqa: S606
+            )
         # a file path: file:///C:/..., C:\..., or relative to the workspace
         path_text = target
         if scheme == "file":
@@ -410,7 +425,8 @@ class GuiSession:
             if parsed.netloc and parsed.netloc.lower() != "localhost":
                 self.notice("Not opened: network (UNC) file links do not open from agent-neo.", "warn")
                 return {"ok": False, "error": "unc"}
-            path_text = unquote(parsed.path).lstrip("/").replace("/", "\\")
+            raw_path = unquote(parsed.path)
+            path_text = raw_path.lstrip("/").replace("/", "\\") if os.name == "nt" else raw_path
         elif scheme and len(scheme) > 1:
             self.notice(f"Not opened: unsupported link type '{scheme}:'.", "warn")
             return {"ok": False, "error": "scheme"}
@@ -441,9 +457,16 @@ class GuiSession:
 
     def _open_path(self, p: Path, reveal: bool, record_kind: str = "file") -> dict[str, Any]:
         if reveal:
-            return self._launch({"kind": record_kind, "target": str(p), "reveal": True},
-                                lambda: subprocess.Popen(["explorer.exe", f"/select,{p}"]))
-        return self._launch({"kind": record_kind, "target": str(p), "reveal": False}, lambda: os.startfile(str(p)))  # noqa: S606
+            return self._launch(
+                {"kind": record_kind, "target": str(p), "reveal": True},
+                lambda: subprocess.Popen(["explorer.exe", f"/select,{p}"])
+                if os.name == "nt"
+                else subprocess.Popen(["open", "-R", str(p)]),
+            )
+        return self._launch(
+            {"kind": record_kind, "target": str(p), "reveal": False},
+            lambda: os.startfile(str(p)) if hasattr(os, "startfile") else subprocess.Popen(["open", str(p)]),  # noqa: S606
+        )
 
     def _launch(self, record: dict[str, Any], action: Callable[[], Any]) -> dict[str, Any]:
         if _test_no_open():

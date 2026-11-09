@@ -37,6 +37,8 @@ BROWSERS: dict[str, dict[str, object]] = {
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
             r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
             os.path.join(_LOCALAPPDATA, r"Microsoft\Edge\Application\msedge.exe"),
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         ],
         # Dedicated, isolated profile so it never collides with the user's real browser.
         "user_data_dir": os.path.join(_LOCALAPPDATA, "agent-neo-edge"),
@@ -48,6 +50,7 @@ BROWSERS: dict[str, dict[str, object]] = {
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
             os.path.join(_LOCALAPPDATA, r"Google\Chrome\Application\chrome.exe"),
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         ],
         "user_data_dir": os.path.join(_LOCALAPPDATA, "agent-neo-chrome"),
     },

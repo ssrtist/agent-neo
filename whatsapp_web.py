@@ -496,7 +496,7 @@ class WhatsAppWebDriver(web.WebCopilotDriver):
                     pass
             if val:
                 input_box.click()
-                page.keyboard.press("Control+A")
+                page.keyboard.press("Meta+A" if web.sys.platform == "darwin" else "Control+A")
                 page.keyboard.press("Backspace")
                 time.sleep(0.1)
         except Exception:  # noqa: BLE001
@@ -557,7 +557,7 @@ class WhatsAppWebDriver(web.WebCopilotDriver):
 
         input_box.click()
         time.sleep(0.2)
-        page.keyboard.press("Control+A")
+        page.keyboard.press("Meta+A" if web.sys.platform == "darwin" else "Control+A")
         page.keyboard.press("Backspace")
         time.sleep(0.2)
 

@@ -264,12 +264,16 @@ class WebCopilotDriver:
             try:
                 target_id = page_cdp.send("Target.getTargetInfo")["targetInfo"]["targetId"]
                 window_id = cdp.send("Browser.getWindowForTarget", {"targetId": target_id})["windowId"]
-                cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {"windowState": "normal"}})
                 if onscreen:
+                    cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {"windowState": "normal"}})
                     bounds = {"left": 100, "top": 100, "width": WINDOW_SIZE[0], "height": WINDOW_SIZE[1]}
+                    cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": bounds})
+                elif sys.platform == "darwin":
+                    cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {"windowState": "minimized"}})
                 else:
+                    cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {"windowState": "normal"}})
                     bounds = {"left": OFFSCREEN_POS[0], "top": OFFSCREEN_POS[1], "width": WINDOW_SIZE[0], "height": WINDOW_SIZE[1]}
-                cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": bounds})
+                    cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": bounds})
             finally:
                 for session in (page_cdp, cdp):
                     try:
@@ -512,7 +516,7 @@ class WebCopilotDriver:
                 input_box = self.find_input(timeout_ms=2000)
             if input_box.inner_text().strip():
                 input_box.click()
-                page.keyboard.press("Control+A")
+                page.keyboard.press("Meta+A" if sys.platform == "darwin" else "Control+A")
                 page.keyboard.press("Backspace")
                 time.sleep(0.1)
         except Exception:
@@ -556,7 +560,7 @@ class WebCopilotDriver:
         # Focus and clean composer
         input_box.click()
         time.sleep(0.2)
-        page.keyboard.press("Control+A")
+        page.keyboard.press("Meta+A" if sys.platform == "darwin" else "Control+A")
         page.keyboard.press("Backspace")
         time.sleep(0.2)
 
@@ -658,14 +662,34 @@ class WebCopilotDriver:
             except Exception:
                 pass
 
-            # Extract message text
+            # Extract message text (prefer raw unrendered React Fiber text before Markdown/HTML sanitization)
             raw_text = ""
             try:
-                content_elem = target_bubble.locator(".fai-CopilotMessage__content").first
-                if content_elem.is_visible():
-                    raw_text = content_elem.inner_text().strip()
-                else:
-                    raw_text = target_bubble.inner_text().strip()
+                if hasattr(target_bubble, "evaluate"):
+                    fiber_text = target_bubble.evaluate(
+                        """(node) => {
+                            const target = node.querySelector('[data-testid="markdown-reply"]') || node;
+                            const reactKey = Object.keys(target).find(k => k.startsWith('__reactFiber') || k.startsWith('__reactProps'));
+                            if (!reactKey) return '';
+                            let cur = target[reactKey];
+                            for (let depth = 0; depth < 14 && cur; depth++) {
+                                const p = cur.memoizedProps || cur.pendingProps || {};
+                                if (typeof p.replyMessage === 'string' && p.replyMessage.trim()) return p.replyMessage;
+                                if (p.response && typeof p.response.text === 'string' && p.response.text.trim()) return p.response.text;
+                                if (typeof p.legacyReplyMessage === 'string' && p.legacyReplyMessage.trim()) return p.legacyReplyMessage;
+                                cur = cur.return;
+                            }
+                            return '';
+                        }"""
+                    )
+                    if isinstance(fiber_text, str) and fiber_text.strip():
+                        raw_text = fiber_text.strip()
+                if not raw_text:
+                    content_elem = target_bubble.locator(".fai-CopilotMessage__content").first
+                    if content_elem.is_visible():
+                        raw_text = content_elem.inner_text().strip()
+                    else:
+                        raw_text = target_bubble.inner_text().strip()
             except Exception:
                 pass
 

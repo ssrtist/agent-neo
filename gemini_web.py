@@ -278,7 +278,7 @@ class GeminiWebDriver(web.WebCopilotDriver):
         _dismiss_gemini_popups(page)
         input_box.click()
         time.sleep(0.2)
-        page.keyboard.press("Control+A")
+        page.keyboard.press("Meta+A" if web.sys.platform == "darwin" else "Control+A")
         page.keyboard.press("Backspace")
         time.sleep(0.2)
 
