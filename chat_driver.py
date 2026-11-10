@@ -74,7 +74,7 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
 
     if selected == "copilot":
         from copilot_web import WebCopilotDriver
-        driver = WebCopilotDriver(force_fresh=force_fresh, **web_kwargs, **kwargs)
+        driver = WebCopilotDriver(force_fresh=force_fresh, **web_kwargs)
         if new_session_only:
             try:
                 driver.new_conversation()
@@ -84,7 +84,7 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
 
     if selected == "gemini":
         from gemini_web import GeminiWebDriver
-        driver = GeminiWebDriver(force_fresh=force_fresh, **web_kwargs, **kwargs)
+        driver = GeminiWebDriver(force_fresh=force_fresh, **web_kwargs)
         if new_session_only:
             try:
                 driver.new_conversation()
@@ -94,6 +94,8 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
 
     if selected == "whatsapp":
         from whatsapp_web import WhatsAppWebDriver
+        if not getattr(WhatsAppWebDriver, "enabled", False):
+            raise RuntimeError("WhatsAppWebDriver is currently disabled.")
         driver = WhatsAppWebDriver(force_fresh=force_fresh, **web_kwargs, **wa_kwargs, **kwargs)
         if new_session_only:
             try:
@@ -121,7 +123,7 @@ def get_driver(backend: str = "auto", new_session_only: bool = False, custom: di
         from copilot_web import WebCopilotDriver
         mode_str = "reusing existing browser, new session only" if new_session_only else "fresh browser"
         print(f"[chat_driver] Desktop app not detected; using copilot web backend ({mode_str}).")
-        driver = WebCopilotDriver(force_fresh=force_fresh, **web_kwargs, **kwargs)
+        driver = WebCopilotDriver(force_fresh=force_fresh, **web_kwargs)
         if new_session_only:
             try:
                 driver.new_conversation()

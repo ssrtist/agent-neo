@@ -179,6 +179,12 @@ class WhatsAppWebDriver(web.WebCopilotDriver):
     """Automation driver for WhatsApp Web LLM 1:1 chat over CDP."""
 
     backend_name = "whatsapp"
+    enabled: bool = False
+
+    def connect(self, timeout_seconds: int = 60):
+        if not self.enabled:
+            raise RuntimeError("WhatsAppWebDriver is currently disabled.")
+        return super().connect(timeout_seconds=timeout_seconds)
 
     def __init__(
         self,

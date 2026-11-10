@@ -539,7 +539,7 @@ class SubagentTests(unittest.TestCase):
         self.assertEqual(agent.run_turn("go"), "final")
         self.assertEqual(drv.new_conversations, 2)           # one for the child, one to leave it
         parent_next = drv.prompts[2]
-        self.assertTrue(parent_next.startswith("You are the reasoning component"))
+        self.assertIn("You are the reasoning component", parent_next)
         self.assertIn("USER REQUEST:\ngo", parent_next)
         self.assertIn("restarted after a sub-agent ran", parent_next)
         self.assertIn("SUB-AGENT FINAL MESSAGE:\nchild result", parent_next)

@@ -129,7 +129,7 @@ class FakeChatDriver:
 
     # ---- script selection
     def _maybe_start_turn(self, prompt: str) -> None:
-        if not prompt.startswith("You are the reasoning component"):
+        if "You are the reasoning component" not in prompt:
             return  # a tool-result / retry prompt continues the current turn
         if "restarted after a sub-agent ran" in prompt:
             return  # the core re-sent the system prompt after a lost context: same turn

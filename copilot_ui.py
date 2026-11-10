@@ -59,9 +59,10 @@ def get_copilot_window():
 
 
 def is_copilot_running() -> bool:
-    """Check if Microsoft 365 Copilot or Windows Copilot desktop window is currently open."""
+    """Check if Microsoft 365 Copilot or Windows Copilot desktop window is currently open and has a usable composer."""
     try:
-        get_copilot_window()
+        win = get_copilot_window()
+        find_message_input(win)
         return True
     except Exception:
         return False

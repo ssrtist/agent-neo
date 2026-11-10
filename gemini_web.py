@@ -244,9 +244,7 @@ class GeminiWebDriver(web.WebCopilotDriver):
                 except Exception:  # noqa: BLE001
                     pass
                 try:
-                    btn = target_bubble.locator(
-                        f"xpath=ancestor-or-self::model-response//{sel.replace('button', '')}"
-                    ).first
+                    btn = target_bubble.locator("xpath=ancestor-or-self::model-response").locator(sel).first
                     if btn.is_visible():
                         return True
                 except Exception:  # noqa: BLE001

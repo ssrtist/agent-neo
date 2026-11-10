@@ -52,6 +52,18 @@ class _FakeLocator:
 
 
 class WhatsAppDriverTests(unittest.TestCase):
+    def test_whatsapp_driver_disabled_by_default(self) -> None:
+        with self.assertRaises(RuntimeError) as ctx:
+            chat_driver.get_driver("whatsapp")
+        self.assertIn("disabled", str(ctx.exception).lower())
+
+    def test_connect_raises_when_disabled(self) -> None:
+        drv = whatsapp.WhatsAppWebDriver()
+        with self.assertRaises(RuntimeError) as ctx:
+            drv.connect()
+        self.assertIn("disabled", str(ctx.exception).lower())
+
+    @mock.patch.object(whatsapp.WhatsAppWebDriver, "enabled", True)
     def test_factory_builds_whatsapp_driver_with_shared_profile_and_port(self) -> None:
         drv = chat_driver.get_driver("whatsapp")
         self.assertIsInstance(drv, whatsapp.WhatsAppWebDriver)
@@ -60,6 +72,7 @@ class WhatsAppDriverTests(unittest.TestCase):
         self.assertEqual(drv.port, 9365)
         self.assertTrue(edge.same_path(drv.profile_dir, edge.default_profile_dir()))
 
+    @mock.patch.object(whatsapp.WhatsAppWebDriver, "enabled", True)
     def test_factory_custom_phone(self) -> None:
         drv = chat_driver.get_driver("whatsapp", phone="1234567890")
         self.assertIsInstance(drv, whatsapp.WhatsAppWebDriver)
