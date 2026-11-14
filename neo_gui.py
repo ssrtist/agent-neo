@@ -113,6 +113,7 @@ class GuiSession:
         self.running = False
         self.busy = ""                    # a non-turn job in progress (fresh, backend switch)
         self.queued_prompt: str | None = None
+        self.wakeup_queue: list[str] = []
         self.driver: Any = None
         self.agent: Agent | None = None
         self.pending: dict[str, PendingApproval] = {}
@@ -343,7 +344,9 @@ class GuiSession:
             return {"ok": False, "error": "settings"}
         with self.lock:
             self.workspace = target
+            self.wakeup_queue.clear()
             if self.agent is not None:
+                self.agent.close()
                 self.agent.set_workspace(target)
         n = len(self.agent.skills) if self.agent else len(discover_skills(target))
         self.notice(f"Workspace changed to: {target} ({n} skills)")
@@ -515,7 +518,52 @@ class GuiSession:
             skills = self.agent.skills if self.agent else discover_skills(self.workspace)
             self.notice(f"Skills ({len(skills)}): " + (", ".join(skills) or "none"))
             return {"ok": True}
-        self.notice("Commands: /new, /fresh, /workspace [path], /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /steps [N], /yolo, /skills",
+        if cmd == "/tasks":
+            if self.agent is None:
+                self.notice("No active tasks or watches.")
+                return {"ok": True}
+            info = self.agent.task_manager.list_tasks()
+            t_lines = [f"{t['task_id']} [{t['status']}] pid={t['pid']}: {t['command']}" for t in info["tasks"]]
+            w_lines = [f"{w['watch_id']} -> {w['task_id'] or f'timer {w['delay_seconds']}s'}: {w['prompt']}" for w in info["watches"]]
+            summary = "Tasks: " + ("; ".join(t_lines) or "none") + " | Watches: " + ("; ".join(w_lines) or "none")
+            self.notice(summary)
+            return {"ok": True}
+        if cmd == "/watch":
+            wparts = arg.split(maxsplit=1)
+            if self.agent is None:
+                self.notice("Start a turn first before watching a task.", "warn")
+                return {"ok": False}
+            if len(wparts) < 2 or not wparts[1].strip():
+                self.notice("Usage: /watch <task_id|Ns> <follow-up prompt>", "warn")
+                return {"ok": False}
+            target_spec, wprompt = wparts[0].strip(), wparts[1].strip()
+            if target_spec.endswith("s") and target_spec[:-1].replace(".", "", 1).isdigit():
+                res = self.agent.task_manager.watch_task(prompt=wprompt, delay_seconds=float(target_spec[:-1]))
+            else:
+                res = self.agent.task_manager.watch_task(prompt=wprompt, task_id=target_spec)
+            if "error" in res:
+                self.notice(res["error"], "warn")
+                return {"ok": False, **res}
+            self.notice(f"Watching ({res['watch_id']}): will resume when {target_spec} triggers.")
+            return {"ok": True, **res}
+        if cmd == "/unwatch":
+            with self.lock:
+                self.wakeup_queue.clear()
+            if self.agent is None:
+                self.notice("No active watches.")
+                return {"ok": True}
+            if arg.startswith("task_"):
+                res = self.agent.task_manager.unwatch_task(task_id=arg)
+            elif arg:
+                res = self.agent.task_manager.unwatch_task(watch_id=arg)
+            else:
+                res = self.agent.task_manager.unwatch_task()
+            if "error" in res:
+                self.notice(res["error"], "warn")
+                return {"ok": False, **res}
+            self.notice(f"Cancelled watches: {', '.join(res.get('cancelled', [])) or 'none'}")
+            return {"ok": True, **res}
+        self.notice("Commands: /new, /fresh, /workspace [path], /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /steps [N], /yolo, /skills, /tasks, /watch, /unwatch",
                     "info" if cmd == "/help" else "warn")
         return {"ok": cmd == "/help"}
 
@@ -541,11 +589,34 @@ class GuiSession:
                         "Do not type elsewhere during a turn.", "warn")
         return drv
 
+    def _on_wakeup(self, payload: dict[str, Any]) -> None:
+        prompt = payload.get("prompt", "")
+        if not prompt:
+            return
+        wid = payload.get("watch_id", "")
+        reason = payload.get("reason", "watch triggered")
+        queued_only = False
+        with self.lock:
+            if self._shut_down:
+                return
+            if self.running or self.busy:
+                self.wakeup_queue.append(prompt)
+                queued_only = True
+            else:
+                self.running = True
+                self.jobs.put(("turn", prompt))
+        if queued_only:
+            self.notice(f"Wakeup queued ({wid}: {reason})")
+        else:
+            self.notice(f"Reactive wakeup ({wid}): {reason} — resuming...")
+            self.push_state()
+
     def _ensure_agent(self) -> Agent:
         if self.driver is None:
             self.driver = self._make_driver(self.backend)
         if self.agent is None:
-            self.agent = Agent(self.driver, self.workspace, self.settings, self._sink, self.approver)
+            self.agent = Agent(self.driver, self.workspace, self.settings, self._sink, self.approver,
+                               on_wakeup=self._on_wakeup)
         self.agent.driver = self.driver
         self.agent.auto_approve, self.agent.step_chunk = self.yolo, self.step_chunk
         return self.agent
@@ -564,6 +635,8 @@ class GuiSession:
             kind = job[0]
             try:
                 if kind == "shutdown":
+                    if self.agent is not None:
+                        self.agent.close()
                     self._close_driver()
                     return
                 if kind == "turn":
@@ -574,10 +647,18 @@ class GuiSession:
                         continue
                     agent.run_turn(job[1])
                 elif kind == "new_chat":
+                    with self.lock:
+                        self.wakeup_queue.clear()
+                    if self.agent is not None:
+                        self.agent.close()
                     if self.driver is not None:
                         self.driver.new_conversation()
                     self.notice("Started a new conversation topic.")
                 elif kind == "fresh":
+                    with self.lock:
+                        self.wakeup_queue.clear()
+                    if self.agent is not None:
+                        self.agent.close()
                     if self.backend in WEB_BACKENDS and self.fake_script is None:
                         self._close_driver()
                         self.driver = self._make_driver(self.backend, fresh=True)
@@ -587,6 +668,10 @@ class GuiSession:
                             self.driver.new_conversation()
                         self.notice("Started fresh conversation.")
                 elif kind == "backend":
+                    with self.lock:
+                        self.wakeup_queue.clear()
+                    if self.agent is not None:
+                        self.agent.task_manager.clear_watches()
                     new = self._make_driver(job[1])
                     self._close_driver()
                     self.driver = new
@@ -600,9 +685,13 @@ class GuiSession:
                 with self.lock:
                     if kind == "turn":
                         self.running = False
+                        next_p = None
                         if self.queued_prompt:
                             next_p = self.queued_prompt
                             self.queued_prompt = None
+                        elif self.wakeup_queue:
+                            next_p = self.wakeup_queue.pop(0)
+                        if next_p:
                             self.running = True
                             self.jobs.put(("turn", next_p))
                     else:

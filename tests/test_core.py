@@ -556,5 +556,162 @@ class FakeDriverTests(unittest.TestCase):
         self.assertEqual(json.loads(d2.send_message("RESULT:\nUSER REQUEST:\nx"))["message"], "2")
 
 
+class TaskAndWakeupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.s = Scratch("tasks")
+        self.ws = self.s.path / "ws"
+        self.ws.mkdir()
+        self.agents: list[Agent] = []
+
+    def tearDown(self) -> None:
+        for ag in self.agents:
+            ag.close()
+        self.s.cleanup()
+
+    def test_background_shell_marks_ok_and_does_not_abort_batch(self) -> None:
+        batch = {
+            "type": "tools",
+            "calls": [
+                {"name": "run_shell", "arguments": {"command": "Write-Output 'ok_bg'; Start-Sleep -Seconds 5", "background": True}},
+                {"name": "list_tasks", "arguments": {}},
+            ],
+        }
+        agent, drv, rec = make_agent(self.ws, batch, final("batch done"), approver=ScriptedApprover(True))
+        self.agents.append(agent)
+        self.assertEqual(agent.run_turn("batch bg"), "final")
+        results = rec.of("tool_result")
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0]["ok"], results[0]["preview"])
+        self.assertTrue(results[1]["ok"], results[1]["preview"])
+        self.assertIn("task_1", results[1]["preview"])
+
+    def test_wait_task_early_exit_timeout_and_cancel(self) -> None:
+        import neo_core as core
+
+        agent, drv, rec = make_agent(
+            self.ws,
+            tool("run_shell", command="Write-Output 'finished_fast'", background=True),
+            tool("wait_task", task_id="task_1", timeout=15),
+            final("waited"),
+            approver=ScriptedApprover(True),
+        )
+        self.agents.append(agent)
+        self.assertEqual(agent.run_turn("wait fast"), "final")
+        wait_res = json.loads(rec.of("tool_result")[1]["preview"])
+        self.assertFalse(wait_res["timed_out"])
+        self.assertEqual(wait_res["exit_code"], 0)
+        self.assertIn("finished_fast", wait_res["stdout"])
+
+        # Timeout case
+        tm = core.TaskManager(self.ws)
+        try:
+            started = tm.start_task("Start-Sleep -Seconds 10")
+            timed = tm.wait_task(started["task_id"], timeout=0.3)
+            self.assertTrue(timed["timed_out"])
+            self.assertEqual(timed["status"], "running")
+
+            # Cancel case
+            cancelled = True
+            with self.assertRaises(Cancelled):
+                tm.wait_task(started["task_id"], timeout=5, cancel_check=lambda: cancelled)
+        finally:
+            tm.kill_all()
+
+    def test_task_errors_mark_ok_false_and_kill_all_no_deadlock(self) -> None:
+        agent, drv, rec = make_agent(
+            self.ws,
+            tool("read_task", task_id="missing_task"),
+            tool("kill_task", task_id="missing_task"),
+            tool("run_shell", command="Start-Sleep -Seconds 10", background=True),
+            final("checked"),
+            approver=ScriptedApprover(True),
+        )
+        self.agents.append(agent)
+        self.assertEqual(agent.run_turn("err checks"), "final")
+        results = rec.of("tool_result")
+        self.assertFalse(results[0]["ok"])
+        self.assertFalse(results[1]["ok"])
+        self.assertTrue(results[2]["ok"])
+
+        # kill_all must not deadlock and must terminate running task
+        agent.task_manager.kill_all()
+        tasks = agent.task_manager.list_tasks()["tasks"]
+        self.assertEqual(len(tasks), 1)
+        self.assertNotEqual(tasks[0]["status"], "running")
+
+    def test_set_workspace_updates_task_manager_root(self) -> None:
+        other = self.s.path / "other"
+        other.mkdir()
+        agent, _, _ = make_agent(self.ws, final("ok"))
+        self.agents.append(agent)
+        agent.set_workspace(other)
+        self.assertEqual(agent.task_manager.root, other.resolve())
+
+    def test_clean_powershell_env_strips_ps7_paths(self) -> None:
+        import neo_core as core
+
+        dirty = {
+            "PATH": r"C:\Windows\System32",
+            "PSModulePath": (
+                r"C:\Program Files\PowerShell\7\Modules;"
+                r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\Modules;"
+                r"C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules"
+            ),
+        }
+        cleaned = core._clean_powershell_env(dirty)
+        self.assertEqual(cleaned["PSModulePath"], r"C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules")
+
+    def test_run_shell_per_call_timeout_override(self) -> None:
+        agent, drv, rec = make_agent(
+            self.ws,
+            tool("run_shell", command="Start-Sleep -Seconds 5", timeout=0.3),
+            final("done"),
+            approver=ScriptedApprover(True),
+            shell_timeout=60,
+        )
+        self.agents.append(agent)
+        self.assertEqual(agent.run_turn("timeout override"), "final")
+        res = rec.of("tool_result")[0]
+        self.assertFalse(res["ok"])
+        self.assertIn("timed out after 0.3 seconds", res["preview"])
+
+    def test_watch_task_and_timer_reactive_wakeup(self) -> None:
+        wakeups: list[dict] = []
+        fired = threading.Event()
+
+        def on_wakeup(payload: dict) -> None:
+            wakeups.append(payload)
+            fired.set()
+
+        drv = FakeCopilotDriver(script(
+            tool("run_shell", command="Write-Output 'build_ok'", background=True),
+            tool("watch_task", task_id="task_1", prompt="Continue to M3", poll_interval=0.2),
+            final("watching now"),
+        ))
+        rec = Recorder()
+        agent = Agent(drv, self.ws, Settings(), rec, ScriptedApprover(True), skills={}, on_wakeup=on_wakeup)
+        agent.retry_delay = 0.01
+        self.agents.append(agent)
+
+        self.assertEqual(agent.run_turn("start watch"), "final")
+        self.assertTrue(fired.wait(timeout=10), "watch_task wakeup did not fire")
+        self.assertEqual(len(wakeups), 1)
+        self.assertIn("task_1 exited (0)", wakeups[0]["prompt"])
+        self.assertIn("build_ok", wakeups[0]["prompt"])
+        self.assertIn("Continue to M3", wakeups[0]["prompt"])
+
+        # Timer watch + unwatch_task cancellation
+        cancelled_w = agent.task_manager.watch_task(prompt="never fire", delay_seconds=5)
+        unwatch_res = agent.task_manager.unwatch_task(watch_id=cancelled_w["watch_id"])
+        self.assertEqual(unwatch_res["cancelled"], [cancelled_w["watch_id"]])
+
+        fired.clear()
+        timer_w = agent.task_manager.watch_task(prompt="timer ping", delay_seconds=0.2)
+        self.assertEqual(timer_w["status"], "watching")
+        self.assertTrue(fired.wait(timeout=5), "timer watch did not fire")
+        self.assertIn("timer elapsed", wakeups[-1]["reason"])
+        self.assertIn("timer ping", wakeups[-1]["prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,7 @@ class Settings:
     hard_ceiling: int = 255
     auto_approve: bool = False
     subagent_max_steps: int = 10
+    shell_timeout: int = 120
     # Where each value came from (key -> "default" | file path | "cli"), for diagnostics.
     sources: dict[str, str] = field(default_factory=dict, compare=False, repr=False)
     # The resolved custom-instructions file (absolute) or "" when unset.
@@ -72,7 +73,7 @@ _CHOICES: dict[str, tuple[str, ...]] = {"backend": BACKENDS, "browser_mode": BRO
 CUSTOM_TABLE = {"url": "custom_url", "input_selector": "custom_input_selector",
                 "send_selector": "custom_send_selector", "bubble_selector": "custom_bubble_selector"}
 CUSTOM_KEYS = frozenset(CUSTOM_TABLE.values())
-_POSITIVE = {"cdp_port", "step_chunk", "hard_ceiling", "subagent_max_steps"}
+_POSITIVE = {"cdp_port", "step_chunk", "hard_ceiling", "subagent_max_steps", "shell_timeout"}
 
 
 def neo_home() -> Path:

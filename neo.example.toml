@@ -56,6 +56,9 @@ browser_profile_dir = ""
 step_chunk = 10
 hard_ceiling = 255
 
+# Default foreground timeout (seconds) for run_shell commands.
+shell_timeout = 120
+
 # Approve every tool call automatically (the same as --yolo). Use with care.
 auto_approve = false
 

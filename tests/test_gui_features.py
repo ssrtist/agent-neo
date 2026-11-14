@@ -86,6 +86,41 @@ class GuiFeaturesTests(unittest.TestCase):
         self.assertIn('Open and free agent harness for all LLM web chats', html)
         self.assertNotIn('Agent Neo (agent-neo):', html)
 
+    def test_gui_session_wakeup_queues_when_busy_and_runs_when_idle(self) -> None:
+        self.session.running = True
+        self.session._on_wakeup({"watch_id": "watch_1", "reason": "task_1 exited (0)", "prompt": "resume M3"})
+        self.assertEqual(self.session.wakeup_queue, ["resume M3"])
+
+        # Clear and verify idle dispatch queues a turn job
+        self.session.wakeup_queue.clear()
+        self.session.running = False
+        fake_jobs: list[tuple] = []
+        self.session.jobs = MagicMock()
+        self.session.jobs.put.side_effect = fake_jobs.append
+        self.session._on_wakeup({"watch_id": "watch_2", "reason": "timer elapsed", "prompt": "check status"})
+        self.assertTrue(self.session.running)
+        self.assertEqual(fake_jobs, [("turn", "check status")])
+        self.session.running = False
+
+    def test_gui_slash_watch_and_tasks(self) -> None:
+        self.session.agent = neo_core.Agent(
+            driver=MagicMock(),
+            root=self.ws,
+            settings=neo_core.Settings(),
+            sink=lambda e: None,
+            on_wakeup=self.session._on_wakeup,
+        )
+        res = self.session.slash("/watch 5s check build")
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(len(self.session.agent.task_manager.list_tasks()["watches"]), 1)
+
+        res_tasks = self.session.slash("/tasks")
+        self.assertTrue(res_tasks.get("ok"))
+
+        res_unwatch = self.session.slash("/unwatch")
+        self.assertTrue(res_unwatch.get("ok"))
+        self.assertEqual(self.session.agent.task_manager.list_tasks()["watches"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

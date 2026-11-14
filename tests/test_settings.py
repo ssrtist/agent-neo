@@ -102,6 +102,7 @@ class SettingsTests(unittest.TestCase):
             'browser_mode = "minimised"': "browser_mode",
             'backend = "chatgpt"': "backend",
             "hard_ceiling = 0": "hard_ceiling",
+            "shell_timeout = 0": "shell_timeout",
             "cdp_port = 70000": "cdp_port",
         }
         for text, key in cases.items():

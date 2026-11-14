@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue
 import sys
 from pathlib import Path
 from typing import Any
@@ -212,6 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"Dynamic threshold of sequential tool steps before pausing (default: {DEFAULT_STEP_CHUNK})")
     parser.add_argument("--hard-ceiling", type=int, default=None,
                         help=f"Hard ceiling of maximum allowed tool steps per task loop (default: {MAX_SESSION_STEPS})")
+    parser.add_argument("--shell-timeout", type=int, default=None,
+                        help="Default foreground timeout in seconds for run_shell commands (default: 120)")
     parser.add_argument("--yolo", "--auto-approve", dest="yolo", action="store_true", default=None,
                         help="Auto-approve all tool calls without prompting (YOLO mode)")
     parser.add_argument("--show-thinking", dest="show_thinking", action="store_true", default=None,
@@ -235,6 +238,7 @@ def cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "whatsapp_contact": args.whatsapp_contact,
         "step_chunk": args.step_chunk,
         "hard_ceiling": args.hard_ceiling,
+        "shell_timeout": args.shell_timeout,
         "auto_approve": args.yolo,
         "show_thinking": args.show_thinking,
         "enable_subagents": args.enable_subagents,
@@ -281,20 +285,30 @@ def main() -> None:
     def notify(text: str) -> None:
         renderer({"type": "status", "text": text})
 
+    wakeup_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    def on_wakeup(payload: dict[str, Any]) -> None:
+        wakeup_queue.put(payload)
+
     current_backend = settings.backend
     driver = make_driver(current_backend, settings, new_session_only, fake_script, notify)
-    agent = Agent(driver, ROOT, settings, sink, CliApprover())
+    agent = Agent(driver, ROOT, settings, sink, CliApprover(), on_wakeup=on_wakeup)
     print(f"Discovered {len(agent.skills)} skills: {', '.join(agent.skills.keys()) if agent.skills else 'none'}")
     print(f"Active backend: {driver.__class__.__name__}")
     print("Commands: /new, /fresh, /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /workspace [path], /skills, /steps [N], /yolo, /quit")
+    print("Task commands: /tasks, /watch <task_id|Ns> <prompt>, /unwatch [id]")
 
     try:
         while True:
             try:
-                user_text = input("\nyou> ").strip()
+                user_text, is_wakeup = _next_cli_input(agent, wakeup_queue)
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting agent-neo...")
                 break
+
+            if is_wakeup:
+                run_turn_with_ctrl_c(agent, user_text)
+                continue
 
             if not user_text:
                 continue
@@ -304,11 +318,15 @@ def main() -> None:
                 break
 
             if user_text == "/new":
+                _drain_queue(wakeup_queue)
+                agent.close()
                 driver.new_conversation()
                 print("Started a new conversation topic.")
                 continue
 
             if user_text == "/fresh":
+                _drain_queue(wakeup_queue)
+                agent.close()
                 if current_backend in WEB_BACKENDS and fake_script is None:
                     print("Recycling browser and launching a fresh instance...")
                     driver.close()
@@ -346,6 +364,8 @@ def main() -> None:
                             print(f"[settings] warning: {w}")
                         yolo, chunk = agent.auto_approve, agent.step_chunk
                         ROOT = target_dir
+                        _drain_queue(wakeup_queue)
+                        agent.close()
                         agent.set_settings(new_settings)
                         agent.auto_approve, agent.step_chunk = yolo, chunk   # session toggles survive
                         agent.set_workspace(ROOT)
@@ -375,11 +395,56 @@ def main() -> None:
                     print(f"  - {k}: {v['description']}")
                 continue
 
+            if user_text == "/tasks":
+                info = agent.task_manager.list_tasks()
+                print(f"Tasks ({len(info['tasks'])}):")
+                for t in info["tasks"]:
+                    print(f"  - {t['task_id']} [{t['status']}] pid={t['pid']}: {t['command']}")
+                print(f"Watches ({len(info['watches'])}):")
+                for w in info["watches"]:
+                    target = w["task_id"] or f"timer {w['delay_seconds']}s"
+                    print(f"  - {w['watch_id']} -> {target}: {w['prompt']}")
+                continue
+
+            if user_text.startswith("/watch"):
+                parts = user_text.split(maxsplit=2)
+                if len(parts) < 3 or not parts[2].strip():
+                    print("Usage: /watch <task_id|Ns> <follow-up prompt>")
+                    continue
+                target_spec, wprompt = parts[1].strip(), parts[2].strip()
+                if target_spec.endswith("s") and target_spec[:-1].replace(".", "", 1).isdigit():
+                    res = agent.task_manager.watch_task(prompt=wprompt, delay_seconds=float(target_spec[:-1]))
+                else:
+                    res = agent.task_manager.watch_task(prompt=wprompt, task_id=target_spec)
+                if "error" in res:
+                    print(f"Error: {res['error']}")
+                else:
+                    print(f"Watching ({res['watch_id']}): will resume when {target_spec} triggers.")
+                continue
+
+            if user_text.startswith("/unwatch"):
+                _drain_queue(wakeup_queue)
+                parts = user_text.split(maxsplit=1)
+                arg = parts[1].strip() if len(parts) > 1 else ""
+                if arg.startswith("task_"):
+                    res = agent.task_manager.unwatch_task(task_id=arg)
+                elif arg:
+                    res = agent.task_manager.unwatch_task(watch_id=arg)
+                else:
+                    res = agent.task_manager.unwatch_task()
+                if "error" in res:
+                    print(f"Error: {res['error']}")
+                else:
+                    print(f"Cancelled watches: {', '.join(res.get('cancelled', [])) or 'none'}")
+                continue
+
             if user_text.startswith("/backend"):
                 parts = user_text.split()
                 target_b = BACKEND_ALIASES.get(parts[1].lower(), parts[1].lower()) if len(parts) > 1 else ""
                 if target_b in BACKENDS:
                     try:
+                        _drain_queue(wakeup_queue)
+                        agent.task_manager.clear_watches()
                         new_drv = make_driver(target_b, agent.settings, new_session_only, fake_script, notify)
                         driver.close()
                         driver = new_drv
@@ -394,7 +459,81 @@ def main() -> None:
 
             run_turn_with_ctrl_c(agent, user_text)
     finally:
+        agent.close()
         driver.close()
+
+
+def _drain_queue(q: queue.Queue[Any]) -> None:
+    while True:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            return
+
+
+def _next_cli_input(agent: Agent, wakeup_queue: queue.Queue[dict[str, Any]]) -> tuple[str, bool]:
+    """Wait for either user stdin or a reactive wakeup payload when watches are active."""
+    try:
+        payload = wakeup_queue.get_nowait()
+        print(f"\n[wakeup] {payload.get('reason', 'watch triggered')} — resuming turn...")
+        return payload["prompt"], True
+    except queue.Empty:
+        pass
+
+    watches = agent.task_manager.list_tasks()["watches"]
+    if not watches or not sys.stdin.isatty():
+        return input("\nyou> ").strip(), False
+
+    print("\nyou> ", end="", flush=True)
+    if os.name == "nt":
+        import msvcrt
+        import time
+
+        buf: list[str] = []
+        while True:
+            if not buf:
+                try:
+                    payload = wakeup_queue.get_nowait()
+                    print(f"\n[wakeup] {payload.get('reason', 'watch triggered')} — resuming turn...")
+                    return payload["prompt"], True
+                except queue.Empty:
+                    pass
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    print()
+                    return "".join(buf).strip(), False
+                if ch == "\x03":
+                    raise KeyboardInterrupt
+                if ch in ("\x08", "\x7f"):
+                    if buf:
+                        buf.pop()
+                        sys.stdout.write("\b \b")
+                        sys.stdout.flush()
+                elif ch in ("\x00", "\xe0"):
+                    msvcrt.getwch()  # consume extended key code
+                else:
+                    buf.append(ch)
+                    sys.stdout.write(ch)
+                    sys.stdout.flush()
+            else:
+                time.sleep(0.1)
+    else:  # pragma: no cover
+        import select
+
+        while True:
+            try:
+                payload = wakeup_queue.get_nowait()
+                print(f"\n[wakeup] {payload.get('reason', 'watch triggered')} — resuming turn...")
+                return payload["prompt"], True
+            except queue.Empty:
+                pass
+            ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+            if ready:
+                line = sys.stdin.readline()
+                if line == "":
+                    raise EOFError
+                return line.strip(), False
 
 
 def run_turn_with_ctrl_c(agent: Agent, user_text: str) -> None:

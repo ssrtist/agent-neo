@@ -24,6 +24,7 @@ import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from datetime import datetime
 from html.parser import HTMLParser
 from dataclasses import replace
@@ -65,7 +66,9 @@ Additional tools & features:
 - edit_file supports multi-hunk edits via {"type":"tool","name":"edit_file","arguments":{"path":"relative/path.txt","edits":[{"old":"...","new":"..."}, ...]}}
 - ask_user: {"type":"tool","name":"ask_user","arguments":{"question":"clarification question","options":["opt1","opt2"]}}
 - web_fetch: {"type":"tool","name":"web_fetch","arguments":{"url":"http://localhost:3000/api","max_chars":8000}}
-- run_shell background: {"command":"...","background":true} returns task_id; inspect with read_task {"task_id":"..."} or terminate with kill_task {"task_id":"..."}
+- run_shell optional timeout: {"command":"...","timeout":600} overrides the default foreground timeout (seconds).
+- run_shell background: {"command":"...","background":true} returns task_id; inspect with read_task {"task_id":"..."}, wait in-turn with wait_task {"task_id":"...","timeout":300}, list with list_tasks {}, or terminate with kill_task {"task_id":"..."}
+- watch_task / unwatch_task: {"type":"tool","name":"watch_task","arguments":{"task_id":"task_1","prompt":"follow-up prompt"}} registers a background wakeup (optional "poll_interval", "timeout", or "delay_seconds" for a timer) so you can return final now and resume automatically later; cancel with unwatch_task {"watch_id":"..."}
 - Batching: multiple tool calls can be combined in one turn via {"type":"tools","calls":[{"name":...,"arguments":...}, ...]}
 - When write_file or edit_file arguments contain HTML tags or Markdown characters (<, >, *, _), wrap your JSON response in a ```json ... ``` code block so the web chat UI does not strip tags or formatting.
 
@@ -328,6 +331,16 @@ def tool_summary(name: str, args: Any) -> str:
         p = args.get("pattern", "")
         tgt = args.get("path", "")
         value = f"{p}" + (f" in {tgt}" if tgt else "")
+    elif name in ("read_task", "wait_task", "kill_task"):
+        value = args.get("task_id", "")
+    elif name == "watch_task":
+        tid = args.get("task_id", "")
+        delay = args.get("delay_seconds", "")
+        value = f"{tid}" if tid else f"delay {delay}s"
+    elif name == "unwatch_task":
+        value = args.get("watch_id") or args.get("task_id") or "all"
+    elif name == "list_tasks":
+        value = "tasks & watches"
     else:
         value = args.get("path", "")
     return re.sub(r"\s+", " ", str(value)).strip()[:160]
@@ -434,6 +447,23 @@ def discover_skills(root: Path, backend: str = "copilot") -> dict[str, dict[str,
 # --------------------------------------------------------------------------- tools
 
 
+_PS7_MODULE_PATH_RE = re.compile(r"(?:^|[\\/])(?:powershell[\\/]7|microsoft\.powershell_7)", re.IGNORECASE)
+
+
+def _clean_powershell_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return an env copy with PowerShell 7 module paths stripped from PSModulePath.
+
+    Prevents Windows PowerShell 5.1 (powershell.exe) from loading PS 7's
+    Microsoft.PowerShell.Security module when the harness was launched from pwsh.exe.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    for key in list(env.keys()):
+        if key.lower() == "psmodulepath":
+            parts = [p for p in env[key].split(";") if p.strip() and not _PS7_MODULE_PATH_RE.search(p)]
+            env[key] = ";".join(parts)
+    return env
+
+
 def _kill_tree(pid: int) -> None:
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, timeout=30)
@@ -448,13 +478,29 @@ def _kill_tree(pid: int) -> None:
 
 
 class TaskManager:
-    """Session-scoped background process manager."""
+    """Session-scoped background process and reactive wakeup manager."""
 
-    def __init__(self, root: Path) -> None:
+    _MAX_BUFFER_BYTES = 1_048_576  # 1 MiB rolling tail per stream
+
+    def __init__(self, root: Path, on_wakeup: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.root = root
-        self._lock = threading.Lock()
+        self.on_wakeup = on_wakeup
+        self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self._counter = 0
+        self._watches: dict[str, dict[str, Any]] = {}
+        self._watch_counter = 0
+
+    def _append_chunk(self, entry: dict[str, Any], key: str, size_key: str, chunk: bytes) -> None:
+        if not chunk:
+            return
+        with self._lock:
+            buf: deque[bytes] = entry[key]
+            buf.append(chunk)
+            entry[size_key] += len(chunk)
+            while entry[size_key] > self._MAX_BUFFER_BYTES and len(buf) > 1:
+                removed = buf.popleft()
+                entry[size_key] -= len(removed)
 
     def start_task(self, command: str) -> dict[str, Any]:
         with self._lock:
@@ -462,29 +508,45 @@ class TaskManager:
             task_id = f"task_{self._counter}"
             if os.name == "nt":
                 argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
+                env = _clean_powershell_env()
             else:
                 argv = ["/bin/sh", "-lc", command]
+                env = None
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             proc = subprocess.Popen(argv, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    stdin=subprocess.DEVNULL, creationflags=flags)
-            entry = {
+                                    stdin=subprocess.DEVNULL, env=env, creationflags=flags)
+            entry: dict[str, Any] = {
                 "id": task_id,
                 "command": command,
                 "proc": proc,
-                "stdout_chunks": [],
-                "stderr_chunks": [],
+                "stdout_chunks": deque(),
+                "stderr_chunks": deque(),
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
                 "started_at": time.time(),
             }
 
-            def _reader(stream, storage):
+            def _reader(stream, key: str, size_key: str) -> None:
                 try:
-                    for line in iter(stream.readline, b""):
-                        storage.append(line)
+                    fd = stream.fileno() if hasattr(stream, "fileno") else None
+                except Exception:
+                    fd = None
+                try:
+                    while True:
+                        chunk = os.read(fd, 4096) if fd is not None else stream.read(4096)
+                        if not chunk:
+                            break
+                        self._append_chunk(entry, key, size_key, chunk)
                 except Exception:
                     pass
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
 
-            t_out = threading.Thread(target=_reader, args=(proc.stdout, entry["stdout_chunks"]), daemon=True)
-            t_err = threading.Thread(target=_reader, args=(proc.stderr, entry["stderr_chunks"]), daemon=True)
+            t_out = threading.Thread(target=_reader, args=(proc.stdout, "stdout_chunks", "stdout_bytes"), daemon=True)
+            t_err = threading.Thread(target=_reader, args=(proc.stderr, "stderr_chunks", "stderr_bytes"), daemon=True)
             t_out.start()
             t_err.start()
             self._tasks[task_id] = entry
@@ -509,6 +571,189 @@ class TaskManager:
                 "stderr": err_text,
             }
 
+    def wait_task(
+        self,
+        task_id: str,
+        timeout: float = 300,
+        cancel_check: Callable[[], bool] | None = None,
+        max_chars: int = 8000,
+    ) -> dict[str, Any]:
+        with self._lock:
+            entry = self._tasks.get(task_id)
+            if not entry:
+                return {"error": f"Task {task_id!r} not found"}
+            proc = entry["proc"]
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while proc.poll() is None:
+            if cancel_check and cancel_check():
+                raise Cancelled("wait_task cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.25, remaining))
+        if cancel_check and cancel_check():
+            raise Cancelled("wait_task cancelled")
+        res = self.read_task(task_id, max_chars=max_chars)
+        res["timed_out"] = proc.poll() is None
+        return res
+
+    def list_tasks(self) -> dict[str, Any]:
+        with self._lock:
+            tasks = []
+            for tid, entry in self._tasks.items():
+                proc = entry["proc"]
+                alive = proc.poll() is None
+                tasks.append({
+                    "task_id": tid,
+                    "pid": proc.pid,
+                    "status": "running" if alive else f"exited ({proc.returncode})",
+                    "exit_code": proc.returncode,
+                    "command": entry["command"],
+                    "started_at": entry["started_at"],
+                })
+            watches = []
+            for wid, w in self._watches.items():
+                watches.append({
+                    "watch_id": wid,
+                    "task_id": w["task_id"],
+                    "prompt": w["prompt"],
+                    "poll_interval": w["poll_interval"],
+                    "timeout": w["timeout"],
+                    "delay_seconds": w["delay_seconds"],
+                    "created_at": w["created_at"],
+                })
+            return {"tasks": tasks, "watches": watches}
+
+    def watch_task(
+        self,
+        prompt: str,
+        task_id: str = "",
+        poll_interval: float = 5.0,
+        timeout: float | None = None,
+        delay_seconds: float | None = None,
+        max_chars: int = 4000,
+    ) -> dict[str, Any]:
+        prompt = str(prompt or "").strip()
+        if not prompt:
+            return {"error": "'prompt' is required for watch_task"}
+        task_id = str(task_id or "").strip()
+        if not task_id and (delay_seconds is None or float(delay_seconds) <= 0):
+            return {"error": "Provide either 'task_id' or positive 'delay_seconds'"}
+        interval = max(0.2, float(poll_interval))
+        timeout_val = float(timeout) if timeout is not None and float(timeout) > 0 else None
+        delay_val = float(delay_seconds) if delay_seconds is not None and float(delay_seconds) > 0 else None
+
+        with self._lock:
+            if task_id:
+                entry = self._tasks.get(task_id)
+                if not entry:
+                    return {"error": f"Task {task_id!r} not found"}
+                proc = entry["proc"]
+            else:
+                proc = None
+            self._watch_counter += 1
+            watch_id = f"watch_{self._watch_counter}"
+            stop_event = threading.Event()
+            watch_entry: dict[str, Any] = {
+                "id": watch_id,
+                "task_id": task_id,
+                "prompt": prompt,
+                "poll_interval": interval,
+                "timeout": timeout_val,
+                "delay_seconds": delay_val,
+                "stop_event": stop_event,
+                "created_at": time.time(),
+            }
+            self._watches[watch_id] = watch_entry
+
+        def _fire(reason: str, task_snap: dict[str, Any] | None = None, timed_out: bool = False) -> None:
+            with self._lock:
+                self._watches.pop(watch_id, None)
+            if stop_event.is_set() or not self.on_wakeup:
+                return
+            lines = [f"[Reactive Wakeup: {watch_id} | {reason}]"]
+            if task_snap and "error" not in task_snap:
+                lines.append(f"Task status: {task_snap['status']} (exit_code={task_snap['exit_code']})")
+                if task_snap.get("stdout"):
+                    lines.append(f"Recent stdout:\n{task_snap['stdout']}")
+                if task_snap.get("stderr"):
+                    lines.append(f"Recent stderr:\n{task_snap['stderr']}")
+            lines.append(f"\nFollow-up instruction:\n{prompt}")
+            try:
+                self.on_wakeup({
+                    "watch_id": watch_id,
+                    "task_id": task_id,
+                    "reason": reason,
+                    "timed_out": timed_out,
+                    "prompt": "\n".join(lines),
+                    "instruction": prompt,
+                })
+            except Exception:
+                pass
+
+        def _watcher() -> None:
+            if proc is None:
+                assert delay_val is not None
+                if stop_event.wait(delay_val):
+                    return
+                _fire(f"timer elapsed ({delay_val:g}s)")
+                return
+
+            deadline = (time.monotonic() + timeout_val) if timeout_val is not None else None
+            while not stop_event.is_set():
+                if proc.poll() is not None:
+                    snap = self.read_task(task_id, max_chars=max_chars)
+                    _fire(f"{task_id} exited ({proc.returncode})", task_snap=snap, timed_out=False)
+                    return
+                wait_for = interval
+                if deadline is not None:
+                    rem = deadline - time.monotonic()
+                    if rem <= 0:
+                        snap = self.read_task(task_id, max_chars=max_chars)
+                        _fire(f"{task_id} watch timed out after {timeout_val:g}s", task_snap=snap, timed_out=True)
+                        return
+                    wait_for = min(wait_for, rem)
+                if stop_event.wait(wait_for):
+                    return
+
+        threading.Thread(target=_watcher, daemon=True).start()
+        return {
+            "watch_id": watch_id,
+            "task_id": task_id,
+            "status": "watching",
+            "poll_interval": interval,
+            "timeout": timeout_val,
+            "delay_seconds": delay_val,
+            "prompt": prompt,
+        }
+
+    def unwatch_task(self, watch_id: str = "", task_id: str = "") -> dict[str, Any]:
+        watch_id = str(watch_id or "").strip()
+        task_id = str(task_id or "").strip()
+        with self._lock:
+            if watch_id:
+                w = self._watches.pop(watch_id, None)
+                if not w:
+                    return {"error": f"Watch {watch_id!r} not found"}
+                w["stop_event"].set()
+                return {"cancelled": [watch_id], "status": "unwatched"}
+            if task_id:
+                matched = [wid for wid, w in self._watches.items() if w["task_id"] == task_id]
+                if not matched:
+                    return {"error": f"No active watches for task {task_id!r}"}
+                for wid in matched:
+                    self._watches.pop(wid)["stop_event"].set()
+                return {"cancelled": matched, "status": "unwatched"}
+            all_ids = list(self._watches.keys())
+            for wid in all_ids:
+                self._watches.pop(wid)["stop_event"].set()
+            return {"cancelled": all_ids, "status": "unwatched"}
+
+    def clear_watches(self) -> None:
+        with self._lock:
+            for wid in list(self._watches.keys()):
+                self._watches.pop(wid)["stop_event"].set()
+
     def kill_task(self, task_id: str) -> dict[str, Any]:
         with self._lock:
             entry = self._tasks.get(task_id)
@@ -521,10 +766,14 @@ class TaskManager:
                     proc.wait(timeout=3)
                 except Exception:
                     pass
+            # Also cancel any watches attached to this killed task
+            for wid in [k for k, w in self._watches.items() if w["task_id"] == task_id]:
+                self._watches.pop(wid)["stop_event"].set()
             return {"task_id": task_id, "status": "killed"}
 
     def kill_all(self) -> None:
         with self._lock:
+            self.clear_watches()
             for task_id in list(self._tasks.keys()):
                 self.kill_task(task_id)
 
@@ -617,11 +866,13 @@ def run_shell_command(command: str, root: Path, cancel_check: Callable[[], bool]
                       timeout: float = 120) -> str:
     if os.name == "nt":
         argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command]
+        env = _clean_powershell_env()
     else:  # pragma: no cover
         argv = ["/bin/sh", "-lc", command]
+        env = None
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     proc = subprocess.Popen(argv, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            stdin=subprocess.DEVNULL, creationflags=flags)
+                            stdin=subprocess.DEVNULL, env=env, creationflags=flags)
     deadline = time.monotonic() + timeout
     while True:
         try:
@@ -662,6 +913,7 @@ def execute_tool(
     cancel_check: Callable[[], bool] | None = None,
     task_manager: TaskManager | None = None,
     ask_user_fn: Callable[[str, list[str]], str] | None = None,
+    shell_timeout: float = 120,
 ) -> str:
     """Run one protocol tool inside the workspace root."""
     if name == "ask_user":
@@ -689,6 +941,50 @@ def execute_tool(
         task_id = str(args.get("task_id", "")).strip()
         max_chars = int(args.get("max_chars", 8000))
         return json.dumps(task_manager.read_task(task_id, max_chars=max_chars), ensure_ascii=False)
+
+    if name == "wait_task":
+        if not task_manager:
+            return "ERROR: No active task manager"
+        task_id = str(args.get("task_id", "")).strip()
+        timeout_val = float(args.get("timeout", 300))
+        max_chars = int(args.get("max_chars", 8000))
+        return json.dumps(
+            task_manager.wait_task(task_id, timeout=timeout_val, cancel_check=cancel_check, max_chars=max_chars),
+            ensure_ascii=False,
+        )
+
+    if name == "list_tasks":
+        if not task_manager:
+            return "ERROR: No active task manager"
+        return json.dumps(task_manager.list_tasks(), ensure_ascii=False)
+
+    if name == "watch_task":
+        if not task_manager:
+            return "ERROR: No active task manager"
+        if not task_manager.on_wakeup:
+            return "ERROR: Reactive wakeup (watch_task) is unavailable in this context"
+        return json.dumps(
+            task_manager.watch_task(
+                prompt=str(args.get("prompt", "")),
+                task_id=str(args.get("task_id", "")),
+                poll_interval=float(args.get("poll_interval", 5.0)),
+                timeout=args.get("timeout"),
+                delay_seconds=args.get("delay_seconds"),
+                max_chars=int(args.get("max_chars", 4000)),
+            ),
+            ensure_ascii=False,
+        )
+
+    if name == "unwatch_task":
+        if not task_manager:
+            return "ERROR: No active task manager"
+        return json.dumps(
+            task_manager.unwatch_task(
+                watch_id=str(args.get("watch_id", "")),
+                task_id=str(args.get("task_id", "")),
+            ),
+            ensure_ascii=False,
+        )
 
     if name == "kill_task":
         if not task_manager:
@@ -875,7 +1171,18 @@ def execute_tool(
             if not task_manager:
                 return "ERROR: No active task manager"
             return json.dumps(task_manager.start_task(command), ensure_ascii=False)
-        return run_shell_command(command, root, cancel_check)
+        raw_timeout = args.get("timeout")
+        timeout_val = float(shell_timeout)
+        if raw_timeout is not None:
+            try:
+                parsed_timeout = float(raw_timeout)
+                if parsed_timeout > 0:
+                    timeout_val = parsed_timeout
+                else:
+                    return f"ERROR: 'timeout' must be positive; got {raw_timeout!r}"
+            except (TypeError, ValueError):
+                return f"ERROR: 'timeout' must be a number; got {raw_timeout!r}"
+        return run_shell_command(command, root, cancel_check, timeout=timeout_val)
 
     raise ValueError(f"Unknown tool: {name}")
 
@@ -956,6 +1263,7 @@ class Agent:
         skills: dict[str, dict[str, Any]] | None = None,
         cancel: CancelToken | None = None,
         depth: int = 0,
+        on_wakeup: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.driver = driver
         self.root = Path(root).resolve()
@@ -974,7 +1282,7 @@ class Agent:
         self._sub_counter = 0
         self._context_lost = False
         self._custom = read_custom_instructions(settings)
-        self.task_manager = TaskManager(self.root)
+        self.task_manager = TaskManager(self.root, on_wakeup=on_wakeup)
         self._compact_checkpoint = ""
         self.pending_steering: str | None = None
 
@@ -997,7 +1305,12 @@ class Agent:
 
     def set_workspace(self, root: Path) -> None:
         self.root = Path(root).resolve()
-        self.skills = discover_skills(self.root)
+        self.task_manager.root = self.root
+        self.skills = discover_skills(self.root, backend=getattr(self.settings, "backend", "copilot"))
+
+    def close(self) -> None:
+        """Stop all background tasks and reactive watches owned by this agent."""
+        self.task_manager.kill_all()
 
     def set_settings(self, settings: Settings) -> None:
         self.settings = settings
@@ -1249,6 +1562,7 @@ class Agent:
                                 self.cancel.is_set,
                                 task_manager=self.task_manager,
                                 ask_user_fn=lambda q, opts: self._ask_user(q, opts, step),
+                                shell_timeout=getattr(self.settings, "shell_timeout", 120),
                             )
                     except Cancelled:
                         raise
@@ -1259,7 +1573,19 @@ class Agent:
                         ok = False
                     elif ok and name == "run_shell":
                         try:
-                            ok = json.loads(result).get("exit_code") == 0
+                            parsed = json.loads(result)
+                            if isinstance(parsed, dict):
+                                if "exit_code" in parsed:
+                                    ok = parsed.get("exit_code") == 0
+                                else:
+                                    ok = "error" not in parsed
+                        except (ValueError, AttributeError):
+                            pass
+                    elif ok and name in ("read_task", "kill_task", "wait_task", "list_tasks", "watch_task", "unwatch_task"):
+                        try:
+                            parsed = json.loads(result)
+                            if isinstance(parsed, dict) and "error" in parsed:
+                                ok = False
                         except (ValueError, AttributeError):
                             pass
                     self.emit("tool_result", name=name, ok=ok, preview=truncate(result, PREVIEW_CHARS),
@@ -1360,6 +1686,7 @@ class Agent:
         try:
             outcome, message = child.run_child(task, context)
         finally:
+            child.close()
             try:
                 close_child(self.driver, child_driver)
             finally:
