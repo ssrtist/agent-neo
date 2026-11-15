@@ -14,6 +14,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import random
 import re
 import socket
 import subprocess
@@ -1517,6 +1518,7 @@ class Agent:
         self.parent: Agent | None = None   # a sub-agent reads yolo from its parent, live
         self.auto_approve = settings.auto_approve
         self.retry_delay = 2.0
+        self.step_delay_range: tuple[float, float] = (0.2, 1.0)
         self._sub_counter = 0
         self._context_lost = False
         self._custom = read_custom_instructions(settings)
@@ -1774,6 +1776,15 @@ class Agent:
         self.emit("turn_end", outcome=outcome)
         return outcome, message
 
+    def _wait_between_steps(self) -> None:
+        """Pause a randomized duration between steps before sending the next prompt."""
+        lo, hi = self.step_delay_range
+        if hi <= 0:
+            return
+        delay = random.uniform(max(0.0, lo), max(lo, hi))
+        if delay > 0 and self.cancel.wait(delay):
+            raise Cancelled("cancelled by user")
+
     def _loop(self, prompt: str, user_text: str, *, pause: bool) -> tuple[str, str]:
         step = 0
         ceiling = self.hard_ceiling
@@ -1781,6 +1792,8 @@ class Agent:
         while True:
             while step < ceiling:
                 self._check_cancel()
+                if step > 0:
+                    self._wait_between_steps()
                 step += 1
                 self.emit("step_start", step=step, limit=limit, ceiling=ceiling)
                 reply = self._send(prompt)
@@ -1992,6 +2005,7 @@ class Agent:
         child.hard_ceiling = max_steps
         child.step_chunk = max_steps
         child.retry_delay = self.retry_delay
+        child.step_delay_range = self.step_delay_range
         try:
             outcome, message = child.run_child(task, context)
         finally:

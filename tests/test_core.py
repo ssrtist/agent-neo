@@ -859,6 +859,49 @@ class TaskAndWakeupTests(unittest.TestCase):
         self.assertFalse(err_res["ok"])
         self.assertIn("Unknown sub-agent persona", err_res["preview"])
 
+    def test_randomized_inter_step_delay_and_cancel(self) -> None:
+        (self.ws / "x.txt").write_text("hi\n", encoding="utf-8")
+        drv = FakeCopilotDriver(script(
+            tool("read_file", path="x.txt"),
+            final("done"),
+        ))
+        rec = Recorder()
+        agent = Agent(drv, self.ws, Settings(auto_approve=True), rec, ScriptedApprover(True))
+        self.agents.append(agent)
+        self.assertEqual(agent.step_delay_range, (0.2, 1.0))
+
+        waits: list[float] = []
+        orig_wait = agent.cancel.wait
+
+        def spy_wait(timeout: float | None = None) -> bool:
+            if timeout is not None:
+                waits.append(timeout)
+            return agent.cancel.is_set()
+
+        with mock.patch.object(agent.cancel, "wait", side_effect=spy_wait):
+            self.assertEqual(agent.run_turn("read x"), "final")
+        self.assertEqual(len(waits), 1)
+        self.assertGreaterEqual(waits[0], 0.2)
+        self.assertLessEqual(waits[0], 1.0)
+
+        # Cancellation during the inter-step delay aborts before step 2 sends
+        drv2 = FakeCopilotDriver(script(
+            tool("read_file", path="x.txt"),
+            final("should not run"),
+        ))
+        rec2 = Recorder()
+        agent2 = Agent(drv2, self.ws, Settings(auto_approve=True), rec2, ScriptedApprover(True))
+        self.agents.append(agent2)
+
+        def cancel_on_wait(timeout: float | None = None) -> bool:
+            agent2.cancel.set()
+            return True
+
+        with mock.patch.object(agent2.cancel, "wait", side_effect=cancel_on_wait):
+            self.assertEqual(agent2.run_turn("cancel during wait"), "cancelled")
+        self.assertEqual(len(drv2.prompts), 1)
+        _ = orig_wait
+
 
 if __name__ == "__main__":
     unittest.main()
