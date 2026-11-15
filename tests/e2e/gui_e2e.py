@@ -127,6 +127,13 @@ class Run:
     def prepare(self) -> None:
         for d in (self.home, self.wv2, self.ws / ".agent-neo", self.ws / "sub"):
             d.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            # Python 3.12+ mkdtemp() strips inherited ACLs via mode 0o700 (OWNER RIGHTS);
+            # when run elevated, WebView2 child processes run under the user SID and need inherited access.
+            subprocess.run(["icacls", str(self.base), "/reset", "/T", "/Q"], capture_output=True)
+            user = os.environ.get("USERNAME", "").strip()
+            if user:
+                subprocess.run(["icacls", str(self.base), "/grant", f"{user}:(OI)(CI)F", "/Q"], capture_output=True)
         (self.ws / "readme.txt").write_text("read me\n", encoding="utf-8")
         (self.ws / "sub" / "note.md").write_text("# note\n", encoding="utf-8")
         (self.ws / "help.chm").write_bytes(b"not really a chm")
@@ -261,7 +268,12 @@ class Run:
         t1 = turn(1)
         self.check("request visible while the turn runs", t1.locator("[data-testid=user-msg]").is_visible()
                    and "list the files" in t1.locator("[data-testid=user-msg]").inner_text())
-        self.check("send disabled and Stop shown while running", page.is_disabled("[data-testid=send]") and page.is_visible("[data-testid=stop]"))
+        self.check(
+            "Stop shown and switch-account disabled while running",
+            page.is_visible("[data-testid=stop]")
+            and not page.is_disabled("[data-testid=send]")
+            and page.is_disabled("[data-testid=switch-account]"),
+        )
         card = t1.locator("[data-testid=askcard]")
         self.check("approval card visible while steps are collapsed",
                    card.is_visible() and not t1.locator("[data-testid=steps]").evaluate("d => d.open")
@@ -564,22 +576,26 @@ class Run:
         self.check('high-contrast accent/line/ok/err colours', [cssvar(v) for v in ('--acc', '--line', '--ok', '--err')]
                    == ['#71b7ff', '#30363d', '#26cd4d', '#ff9492'], cssvar('--acc'))
         opts = page.evaluate("[...document.querySelectorAll('#theme-toggle option')].map(o => o.value)")
-        self.check('theme switcher offers the three themes', opts == ['dark-high-contrast', 'dark', 'light'], str(opts))
+        self.check('theme switcher offers the three themes', opts == ['dark-high-contrast', 'light', 'dayfox'], str(opts))
         page.select_option('[data-testid=theme-toggle]', 'light')
         self.check('switch to light applies at once', th() == 'light' and bg() == 'rgb(247, 248, 250)', bg())
-        page.select_option('[data-testid=theme-toggle]', 'dark')
+        page.select_option('[data-testid=theme-toggle]', 'dayfox')
         page.reload()
         page.wait_for_function('() => window.__neo && window.__neo.state', timeout=30000)
-        self.check('theme persists across reload', th() == 'dark' and bg() == 'rgb(22, 24, 29)'
-                   and page.input_value('[data-testid=theme-toggle]') == 'dark', f'{th()} {bg()}')
+        self.check('theme persists across reload', th() == 'dayfox' and bg() == 'rgb(246, 242, 238)'
+                   and page.input_value('[data-testid=theme-toggle]') == 'dayfox', f'{th()} {bg()}')
         page.evaluate("localStorage.setItem('neo.theme', 'neon')")
         page.reload()
         page.wait_for_function('() => window.__neo && window.__neo.state', timeout=30000)
         self.check('invalid saved theme falls back to Dark High Contrast', th() == 'dark-high-contrast', th())
         hdr = page.evaluate("[...document.querySelector('.convhead').children].map(e => e.id || e.className || e.tagName)")
-        self.check('header controls are siblings (zoom/thinking not nested in the spacer)',
-                   page.evaluate("document.querySelector('.convhead .spacer').children.length") == 0
-                   and page.evaluate("document.getElementById('thinking').parentElement.className") == 'convhead', str(hdr))
+        self.check(
+            'header and toolbelt controls are properly grouped (ribbon + toolbelt-left)',
+            page.evaluate("document.querySelector('.convhead .zoom-control').parentElement.className") == 'convhead'
+            and page.evaluate("document.getElementById('thinking').parentElement.className") == 'toolbelt-left'
+            and page.evaluate("document.getElementById('switch-account').parentElement.className") == 'toolbelt-left',
+            str(hdr),
+        )
 
         # ---- v0.5 D1: a raw Windows path renders with every backslash and as one file link
         home = r"C:\Users\alice.smith\_neo-home"
@@ -591,7 +607,7 @@ class Run:
         page.evaluate("localStorage.removeItem('neo.theme')")   # leave the scratch profile at the default
         # ---- v0.5 D5: the backend dropdown offers the custom web backend
         bk = page.evaluate("[...document.querySelectorAll('#backend option')].map(o => o.value)")
-        self.check('backend dropdown includes custom and whatsapp', 'custom' in bk and 'copilot' in bk and 'whatsapp' in bk, str(bk))
+        self.check('backend dropdown includes deepseek, custom and whatsapp', 'custom' in bk and 'copilot' in bk and 'deepseek' in bk and 'whatsapp' in bk, str(bk))
 
         self.check("no page errors", not errors, "; ".join(errors)[:300])
 

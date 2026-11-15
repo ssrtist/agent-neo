@@ -54,6 +54,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual((settings.cdp_port, settings.step_chunk, settings.hard_ceiling), (9365, 10, 255))
         s_gem, _ = load_settings(self.ws, {"backend": "gemini"}, home=self.home)
         self.assertEqual(s_gem.backend, "gemini")
+        s_ds, _ = load_settings(self.ws, {"backend": "deepseek"}, home=self.home)
+        self.assertEqual(s_ds.backend, "deepseek")
         s_wa, _ = load_settings(self.ws, {"backend": "whatsapp"}, home=self.home)
         self.assertEqual(s_wa.backend, "whatsapp")
         s_web, _ = load_settings(self.ws, {"backend": "web"}, home=self.home)

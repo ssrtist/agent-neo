@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent Neo (agent-neo / neo): a local coding agent driven by Copilot, Gemini, and WhatsApp.
+"""Agent Neo (agent-neo / neo): a local coding agent driven by Copilot, Gemini, DeepSeek, and WhatsApp.
 
 This is the command-line renderer. The agent loop lives in neo_core.py and is shared
 with the GUI (neo_gui.py); this file only prints events and asks at the terminal.
@@ -7,13 +7,14 @@ with the GUI (neo_gui.py); this file only prints events and asks at the terminal
 Supports multiple backends:
   - copilot  : Controls M365 Copilot (https://m365.cloud.microsoft/chat) or Consumer Copilot (https://copilot.microsoft.com) in Edge via Playwright over CDP (default; alias: web)
   - gemini   : Controls Google Gemini (https://gemini.google.com/app) in Edge via Playwright over CDP
+  - deepseek : Controls DeepSeek Chat (https://chat.deepseek.com) in Edge via Playwright over CDP
   - whatsapp : Controls WhatsApp Web (https://web.whatsapp.com/send/?phone=...) in Edge via Playwright over CDP
   - desktop  : Controls M365Copilot.exe / Copilot.exe desktop app via UI Automation (pywinauto)
   - auto     : Automatically detects running desktop app, falling back to copilot web
   - custom   : Controls any web chat page (custom_url) with a pre-harness checklist
 
 Usage:
-  python neo.py [--backend copilot|gemini|whatsapp|desktop|auto|custom] [--workspace <dir>]
+  python neo.py [--backend copilot|gemini|deepseek|whatsapp|desktop|auto|custom] [--workspace <dir>]
   python neo.py --version
 
 Version: see neo_version.py (single source of truth).
@@ -36,6 +37,7 @@ from neo_core import (  # noqa: F401 - parse_action/build_system_prompt/BASE_SYS
     BASE_SYSTEM_INSTRUCTIONS,
     Agent,
     build_system_prompt,
+    discover_agents,
     discover_skills,
     parse_action,
 )
@@ -43,7 +45,7 @@ from neo_events import Cancelled, SessionLog, dedupe_status, fanout
 from neo_settings import BACKEND_ALIASES, BACKENDS, BROWSER_MODES, SettingsError, custom_options, load_settings, neo_home
 from neo_version import __version__, version_string  # noqa: F401
 
-WEB_BACKENDS = ("copilot", "web", "gemini", "whatsapp", "auto", "custom")
+WEB_BACKENDS = ("copilot", "web", "gemini", "deepseek", "whatsapp", "auto", "custom")
 
 
 def _default_root() -> Path:
@@ -189,7 +191,7 @@ class CliApprover:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="neo.py",
-        description=f"{version_string()}: local coding agent driving Copilot, Gemini, and WhatsApp",
+        description=f"{version_string()}: local coding agent driving Copilot, Gemini, DeepSeek, and WhatsApp",
         epilog="Settings: neo.toml in the agent-neo home (NEO_HOME, default ~/.agent-neo) and in "
                "<workspace>/.agent-neo/. Command-line flags override both.",
     )
@@ -294,8 +296,9 @@ def main() -> None:
     driver = make_driver(current_backend, settings, new_session_only, fake_script, notify)
     agent = Agent(driver, ROOT, settings, sink, CliApprover(), on_wakeup=on_wakeup)
     print(f"Discovered {len(agent.skills)} skills: {', '.join(agent.skills.keys()) if agent.skills else 'none'}")
+    print(f"Discovered {len(agent.agents)} agents: {', '.join(agent.agents.keys()) if agent.agents else 'none'}")
     print(f"Active backend: {driver.__class__.__name__}")
-    print("Commands: /new, /fresh, /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /workspace [path], /skills, /steps [N], /yolo, /quit")
+    print("Commands: /new, /fresh, /switch-account, /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>, /workspace [path], /skills, /agents, /agent <name> <task>, /steps [N], /yolo, /quit")
     print("Task commands: /tasks, /watch <task_id|Ns> <prompt>, /unwatch [id]")
 
     try:
@@ -388,11 +391,49 @@ def main() -> None:
                     print("Usage: /steps <num> to change chunk size.")
                 continue
 
+            if user_text in {"/switch-account", "/logout"}:
+                _drain_queue(wakeup_queue)
+                agent.close()
+                if not hasattr(driver, "switch_account"):
+                    print(f"{driver.__class__.__name__} does not support /switch-account.")
+                    continue
+                try:
+                    driver.switch_account()
+                    print("Account switched and signed in.")
+                except Cancelled:
+                    print("Account switch cancelled.")
+                except Exception as exc:
+                    print(f"Account switch failed: {exc}")
+                continue
+
             if user_text == "/skills":
-                agent.skills = discover_skills(ROOT)
+                agent.skills = discover_skills(ROOT, backend=current_backend)
                 print(f"Skills ({len(agent.skills)}):")
                 for k, v in agent.skills.items():
                     print(f"  - {k}: {v['description']}")
+                continue
+
+            if user_text == "/agents":
+                agent.agents = discover_agents(ROOT, backend=current_backend)
+                print(f"Agents ({len(agent.agents)}):")
+                for k, v in agent.agents.items():
+                    atools = v.get("allowed_tools")
+                    tools_str = ", ".join(sorted(atools)) if atools is not None else "all"
+                    print(f"  - {k}: {v['description']} [tools: {tools_str}]")
+                continue
+
+            if user_text == "/agent" or user_text.startswith("/agent "):
+                parts = user_text.split(maxsplit=2)
+                if len(parts) < 3 or not parts[2].strip():
+                    print("Usage: /agent <name> <task>")
+                    continue
+                agent.agents = discover_agents(ROOT, backend=current_backend)
+                spec = agent.resolve_agent(parts[1])
+                if spec is None:
+                    avail = ", ".join(sorted(agent.agents)) or "none"
+                    print(f"Unknown agent {parts[1]!r}. Available: {avail}")
+                    continue
+                run_turn_with_ctrl_c(agent, parts[2].strip(), agent_name=spec["name"])
                 continue
 
             if user_text == "/tasks":
@@ -450,11 +491,13 @@ def main() -> None:
                         driver = new_drv
                         agent.driver = driver
                         current_backend = target_b
+                        agent.skills = discover_skills(ROOT, backend=current_backend)
+                        agent.agents = discover_agents(ROOT, backend=current_backend)
                         print(f"Switched backend to {driver.__class__.__name__}")
                     except Exception as exc:
                         print(f"Failed to switch backend: {exc}")
                 else:
-                    print("Usage: /backend <copilot|gemini|whatsapp|desktop|auto|custom>")
+                    print("Usage: /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>")
                 continue
 
             run_turn_with_ctrl_c(agent, user_text)
@@ -536,7 +579,7 @@ def _next_cli_input(agent: Agent, wakeup_queue: queue.Queue[dict[str, Any]]) -> 
                 return line.strip(), False
 
 
-def run_turn_with_ctrl_c(agent: Agent, user_text: str) -> None:
+def run_turn_with_ctrl_c(agent: Agent, user_text: str, *, agent_name: str | None = None) -> None:
     """Ctrl+C during a turn stops the turn (cooperative cancel); a second Ctrl+C forces it."""
     import signal
 
@@ -556,7 +599,10 @@ def run_turn_with_ctrl_c(agent: Agent, user_text: str) -> None:
     except ValueError:  # not the main thread
         old = None
     try:
-        agent.run_turn(user_text)
+        if agent_name:
+            agent.run_agent_turn(agent_name, user_text)
+        else:
+            agent.run_turn(user_text)
     except KeyboardInterrupt:
         print("\nTurn interrupted (Ctrl+C).")
     finally:

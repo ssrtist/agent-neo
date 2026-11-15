@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import unittest
+from unittest import mock
 
 from tests.support import Recorder, Scratch, ScriptedApprover, final, make_agent, script, tool
 
@@ -711,6 +712,152 @@ class TaskAndWakeupTests(unittest.TestCase):
         self.assertTrue(fired.wait(timeout=5), "timer watch did not fire")
         self.assertIn("timer elapsed", wakeups[-1]["reason"])
         self.assertIn("timer ping", wakeups[-1]["prompt"])
+
+    def test_discover_agents_precedence_and_claude_frontmatter(self) -> None:
+        from neo_core import discover_agents, discover_skills
+
+        home = self.s.path / "fake_home"
+        # Lowest tier: ~/.agent-neo/agents and inactive engine ~/.gemini/agents
+        (home / ".agent-neo" / "agents").mkdir(parents=True)
+        (home / ".agent-neo" / "agents" / "shared.md").write_text(
+            "---\nname: shared\ndescription: from neo home\ntools: Read\n---\nNeo home.\n",
+            encoding="utf-8",
+        )
+        # Active engine home: ~/.copilot/agents overrides ~/.agent-neo/agents
+        (home / ".copilot" / "agents").mkdir(parents=True)
+        (home / ".copilot" / "agents" / "shared.md").write_text(
+            "---\nname: shared\ndescription: from copilot home\ntools: Read, Grep\n---\nCopilot home.\n",
+            encoding="utf-8",
+        )
+        # Workspace root agents/ overrides home
+        (self.ws / "agents").mkdir(parents=True)
+        (self.ws / "agents" / "reviewer.agent.md").write_text(
+            "---\n"
+            "name: reviewer\n"
+            "description: Strict reviewer\n"
+            "tools:\n"
+            "  - Read\n"
+            "  - Grep\n"
+            "  - Glob\n"
+            "  - Bash\n"
+            "disallowedTools: Bash\n"
+            "maxTurns: 4\n"
+            "model: sonnet\n"
+            "---\n"
+            "Review code carefully without editing.\n",
+            encoding="utf-8",
+        )
+        # README without frontmatter must be ignored
+        (self.ws / "agents" / "README.md").write_text("# Agents folder\n", encoding="utf-8")
+        # Workspace .agent-neo/agents overrides root agents/
+        (self.ws / ".agent-neo" / "agents").mkdir(parents=True)
+        (self.ws / ".agent-neo" / "agents" / "override.md").write_text(
+            "---\ndescription: WS override\ntools: Write, Edit\n---\nBody text.\n",
+            encoding="utf-8",
+        )
+
+        agents = discover_agents(self.ws, backend="copilot", home=home)
+        self.assertEqual(agents["shared"]["description"], "from copilot home")
+        self.assertIn("reviewer", agents)
+        self.assertNotIn("README", agents)
+        rev = agents["reviewer"]
+        self.assertEqual(rev["max_turns"], 4)
+        self.assertEqual(rev["model"], "sonnet")
+        self.assertEqual(rev["allowed_tools"], frozenset({"read_file", "grep_search", "list_dir"}))
+        self.assertIn("override", agents)
+        self.assertEqual(agents["override"]["allowed_tools"], frozenset({"write_file", "edit_file"}))
+
+        # DeepSeek engine home check for both discover_skills and discover_agents
+        (home / ".deepseek" / "skills" / "ds-skill").mkdir(parents=True)
+        (home / ".deepseek" / "skills" / "ds-skill" / "SKILL.md").write_text(
+            "---\nname: ds-skill\ndescription: DeepSeek skill\n---\nBody\n",
+            encoding="utf-8",
+        )
+        (home / ".deepseek" / "agents").mkdir(parents=True)
+        (home / ".deepseek" / "agents" / "shared.md").write_text(
+            "---\nname: shared\ndescription: from deepseek home\ntools: Read\n---\nDS home.\n",
+            encoding="utf-8",
+        )
+        with mock.patch("pathlib.Path.home", return_value=home):
+            ds_skills = discover_skills(self.ws, backend="deepseek")
+            self.assertIn("ds-skill", ds_skills)
+        ds_agents = discover_agents(self.ws, backend="deepseek", home=home)
+        self.assertEqual(ds_agents["shared"]["description"], "from deepseek home")
+
+    def test_persona_subagent_and_direct_agent_turn_enforce_allowed_tools(self) -> None:
+        from neo_core import discover_agents
+
+        (self.ws / "note.txt").write_text("hello world\n", encoding="utf-8")
+        (self.ws / "agents").mkdir(parents=True)
+        (self.ws / "agents" / "reader.md").write_text(
+            "---\nname: reader\ndescription: Read only agent\ntools: Read\nmaxTurns: 5\n---\nOnly read files.\n",
+            encoding="utf-8",
+        )
+
+        # 1. Parent invokes run_subagent {"agent": "reader", ...}; child tries write_file (blocked) then read_file (allowed)
+        parent_drv = FakeCopilotDriver(script(
+            tool("run_subagent", task="Inspect note", agent="reader"),
+            final("parent done"),
+        ))
+        child_drv = FakeCopilotDriver(script(
+            tool("write_file", path="evil.txt", content="nope"),
+            tool("read_file", path="note.txt"),
+            final("child read hello world"),
+        ))
+        rec = Recorder()
+        s = Settings(enable_subagents=True, auto_approve=True)
+        agent = Agent(parent_drv, self.ws, s, rec, ScriptedApprover(True))
+        agent.retry_delay = 0.01
+        self.agents.append(agent)
+
+        with mock.patch("neo_core.open_child", return_value=(child_drv, True)), \
+                mock.patch("neo_core.close_child"):
+            self.assertEqual(agent.run_turn("delegate to reader"), "final")
+
+        self.assertIn("AVAILABLE SUB-AGENTS", parent_drv.prompts[0])
+        self.assertIn("- reader: Read only agent [tools: read_file]", parent_drv.prompts[0])
+        self.assertIn("ACTIVE AGENT PERSONA (reader):", child_drv.prompts[0])
+        self.assertIn("ALLOWED TOOLS ONLY: read_file.", child_drv.prompts[0])
+        self.assertFalse((self.ws / "evil.txt").exists())
+        child_events = [e["event"] for e in rec.of("subagent_event")]
+        child_results = [e for e in child_events if e["type"] == "tool_result"]
+        self.assertFalse(child_results[0]["ok"])
+        self.assertIn("not permitted", child_results[0]["preview"])
+        self.assertTrue(child_results[1]["ok"])
+
+        # 2. Direct user /agent turn works even when enable_subagents=False and cleans up persona after turn
+        direct_drv = FakeCopilotDriver(script(
+            tool("write_file", path="evil2.txt", content="nope"),
+            final("checked"),
+        ))
+        rec2 = Recorder()
+        agent2 = Agent(
+            direct_drv, self.ws, Settings(enable_subagents=False, auto_approve=True),
+            rec2, ScriptedApprover(True),
+            agents=discover_agents(self.ws, home=self.s.path / "nohome"),
+        )
+        agent2.retry_delay = 0.01
+        self.agents.append(agent2)
+        self.assertEqual(agent2.run_agent_turn("reader", "check note.txt"), "final")
+        self.assertFalse((self.ws / "evil2.txt").exists())
+        self.assertIn("ACTIVE AGENT PERSONA (reader):", direct_drv.prompts[0])
+        self.assertIsNone(agent2.persona)
+        self.assertIsNone(agent2.allowed_tools)
+        self.assertEqual(agent2.hard_ceiling, 255)
+
+        # 3. Unknown subagent returns clean error
+        bad_drv = FakeCopilotDriver(script(
+            tool("run_subagent", task="do stuff", agent="nonexistent"),
+            final("handled"),
+        ))
+        rec3 = Recorder()
+        agent3 = Agent(bad_drv, self.ws, Settings(enable_subagents=True), rec3, ScriptedApprover(True))
+        agent3.retry_delay = 0.01
+        self.agents.append(agent3)
+        self.assertEqual(agent3.run_turn("unknown persona"), "final")
+        err_res = rec3.of("tool_result")[0]
+        self.assertFalse(err_res["ok"])
+        self.assertIn("Unknown sub-agent persona", err_res["preview"])
 
 
 if __name__ == "__main__":

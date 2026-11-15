@@ -37,7 +37,7 @@ class CliTests(unittest.TestCase):
 
     def test_help_shows_default_copilot_and_browser_mode(self) -> None:
         out = run_cli(["--help"], env=self.env).stdout
-        self.assertIn("--backend {copilot,gemini,whatsapp,desktop,auto,custom,web}", out)
+        self.assertIn("--backend {copilot,gemini,deepseek,whatsapp,desktop,auto,custom,web}", out)
         self.assertIn("default: copilot", out)
         self.assertIn("--browser-mode {offscreen,visible,headless}", out)
         self.assertNotIn("default: auto", out)
@@ -73,7 +73,7 @@ class CliTests(unittest.TestCase):
             "Current limits: safety chunk = 3 steps, ceiling = 255 steps.",
             "[yolo] YOLO mode ENABLED (auto-approving all tools)",
             f"Current workspace: {self.ws.resolve()}",
-            "Commands: /new, /fresh, /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /workspace [path], /skills, /steps [N], /yolo, /quit",
+            "Commands: /new, /fresh, /switch-account, /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>, /workspace [path], /skills, /agents, /agent <name> <task>, /steps [N], /yolo, /quit",
             "Exiting agent-neo...",
         ):
             self.assertIn(expected, out)
@@ -103,6 +103,29 @@ class CliTests(unittest.TestCase):
         self.assertIn("settings error", r.stderr)
         self.assertIn("neo.toml", r.stderr)
         self.assertNotIn("you>", r.stdout)
+
+    def test_agents_slash_commands_and_switch_account_fake_backend(self) -> None:
+        agents_dir = self.ws / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "reviewer.md").write_text(
+            "---\nname: reviewer\ndescription: Read-only auditor\ntools: Read, Grep\n---\nCheck bugs carefully.\n",
+            encoding="utf-8",
+        )
+        script_path = self.s.path / "agent_script.json"
+        script_path.write_text(
+            json.dumps({"scenarios": [{"match": ".", "replies": [{"type": "final", "message": "Audit complete."}]}]}),
+            encoding="utf-8",
+        )
+        r = run_cli(
+            ["-w", str(self.ws), "--fake-backend", str(script_path)],
+            "/agents\n/switch-account\n/agent reviewer inspect repo\n/quit\n",
+            env=self.env,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Discovered 1 agents: reviewer", r.stdout)
+        self.assertIn("reviewer: Read-only auditor [tools: grep_search, read_file]", r.stdout)
+        self.assertIn("does not support /switch-account.", r.stdout)
+        self.assertIn("Audit complete.", r.stdout)
 
 
 if __name__ == "__main__":

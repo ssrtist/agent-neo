@@ -139,6 +139,8 @@ def _is_login_url(url: str) -> bool:
         or "login.live.com" in u
         or "login.microsoft.com" in u
         or "accounts.google.com" in u
+        or "chat.deepseek.com/sign_in" in u
+        or "chat.deepseek.com/login" in u
     )
 
 
@@ -205,13 +207,23 @@ class WebCopilotDriver:
         self._edge_up = False       # ensure_cdp_browser returned: Edge is up on self.port
         self._cancel_check: Callable[[], bool] | None = None   # set for the duration of send_message
 
-    # URL hooks: M365 or Consumer Copilot chat by default; gemini_web.py, whatsapp_web.py and custom_driver.py override them.
+    # URL hooks: M365 or Consumer Copilot chat by default; gemini_web.py, deepseek_web.py, whatsapp_web.py and custom_driver.py override them.
     def _ready_url(self, url: str) -> bool:
         return _is_chat_url(url)
 
     def _own_page_url(self, url: str) -> bool:
         u = (url or "").lower()
         return "cloud.microsoft" in u or "copilot.microsoft.com" in u
+
+    def _auth_domains(self) -> tuple[str, ...]:
+        return ("cloud.microsoft", "copilot.microsoft.com", "microsoftonline.com", "live.com", "microsoft.com")
+
+    @staticmethod
+    def _domain_matches(cookie_domain: str, auth_domains: tuple[str, ...]) -> bool:
+        d = (cookie_domain or "").lstrip(".").lower()
+        if not d:
+            return False
+        return any(d == ad or d.endswith("." + ad) for ad in auth_domains)
 
     def _live_url(self, page: Any) -> str:
         """Query live URL from browser over CDP or fallback to cached property."""
@@ -303,13 +315,9 @@ class WebCopilotDriver:
             pass
         return page
 
-    def connect(self, timeout_seconds: int = 60):
-        """Ensure Edge is running with CDP enabled, then connect Playwright."""
+    def _connect_page(self, timeout_seconds: int = 60):
+        """Ensure Edge is running with CDP enabled and attach to an engine page without waiting for sign-in."""
         if self._page is not None and not self._page.is_closed():
-            if not self._signed_in:
-                # a sign-in wait was interrupted (Stop): run it again, so the window is shown when sign-in needs it
-                self._wait_for_sign_in(self._page, timeout_seconds)
-                self._signed_in = True
             return self._page
         if not self._owner:
             raise RuntimeError("sub-agent tab was closed")
@@ -360,10 +368,186 @@ class WebCopilotDriver:
             self._say("Reusing an Edge that agent-neo did not start: its window is left where it is.")
 
         self._page = target_page
+        return self._page
+
+    def connect(self, timeout_seconds: int = 60):
+        """Ensure Edge is running with CDP enabled, then connect Playwright."""
+        already_open = self._page is not None and not self._page.is_closed()
+        page = self._connect_page(timeout_seconds=timeout_seconds)
+        if already_open:
+            if not self._signed_in:
+                # a sign-in wait was interrupted (Stop): run it again, so the window is shown when sign-in needs it
+                self._wait_for_sign_in(page, timeout_seconds)
+                self._signed_in = True
+            return page
         self._signed_in = False
-        self._wait_for_sign_in(target_page, timeout_seconds)
+        self._wait_for_sign_in(page, timeout_seconds)
         self._signed_in = True
         return self._page
+
+    def _clear_engine_session(self, page: Any) -> int:
+        """Clear cookies and site storage only for this engine's auth/chat domains."""
+        domains = self._auth_domains()
+        cleared = 0
+        cdp = None
+        try:
+            if self._context and callable(getattr(self._context, "new_cdp_session", None)):
+                cdp = self._context.new_cdp_session(page)
+                all_cookies = cdp.send("Network.getAllCookies").get("cookies", [])
+                origins: set[str] = set()
+                for c in all_cookies:
+                    cdom = c.get("domain", "")
+                    if self._domain_matches(cdom, domains):
+                        try:
+                            cdp.send("Network.deleteCookies", {
+                                "name": c.get("name", ""),
+                                "domain": cdom,
+                                "path": c.get("path", "/"),
+                            })
+                            cleared += 1
+                        except Exception:  # noqa: BLE001
+                            pass
+                        host = cdom.lstrip(".")
+                        if host:
+                            origins.add(f"https://{host}")
+                live = self._live_url(page)
+                if live.startswith(("http://", "https://")):
+                    from urllib.parse import urlsplit
+                    parts = urlsplit(live)
+                    if parts.netloc:
+                        origins.add(f"{parts.scheme}://{parts.netloc}")
+                for d in domains:
+                    if d:
+                        origins.add(f"https://{d}")
+                for origin in origins:
+                    try:
+                        cdp.send("Storage.clearDataForOrigin", {
+                            "origin": origin,
+                            "storageTypes": "cookies,local_storage,session_storage,indexeddb,cache_storage,service_workers",
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            if cdp is not None:
+                try:
+                    cdp.detach()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if cleared == 0 and self._context and callable(getattr(self._context, "clear_cookies", None)):
+            for d in domains:
+                if not d:
+                    continue
+                try:
+                    self._context.clear_cookies(domain=d)
+                except TypeError:
+                    break
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if callable(getattr(page, "evaluate", None)):
+            try:
+                page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch {} }")
+            except Exception:  # noqa: BLE001
+                pass
+        return cleared
+
+    @staticmethod
+    def _has_login_prompt(page: Any) -> bool:
+        """True when the current page displays a prominent Sign in / Log in control."""
+        if not hasattr(page, "locator"):
+            return False
+        for sel in (
+            'button:has-text("Sign in")',
+            'a:has-text("Sign in")',
+            'button:has-text("Log in")',
+            'a:has-text("Log in")',
+        ):
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible():
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    def switch_account(self, timeout_seconds: int = 300) -> bool:
+        """Log out of this web engine by clearing its cookies/storage and prompt the user to sign in."""
+        if self.browser_mode == "headless":
+            raise RuntimeError(
+                "Cannot switch accounts in headless browser mode. "
+                "Use browser_mode = \"offscreen\" or \"visible\" so the sign-in window can be shown."
+            )
+        page = self._connect_page(timeout_seconds=min(timeout_seconds, 60))
+        self._clear_engine_session(page)
+        self._signed_in = False
+        try:
+            page.goto(self.url, wait_until="domcontentloaded")
+        except Exception:  # noqa: BLE001
+            pass
+
+        if self.browser_mode == "offscreen" and self._launched:
+            self._set_window(page, onscreen=True)
+        self._say(
+            "Sign-in needed (switch account): the Edge window is now on screen. "
+            "Complete sign-in there; it will move off-screen again when the chat page loads."
+        )
+
+        time.sleep(1.5)
+        deadline = time.monotonic() + timeout_seconds
+        saw_not_ready = False
+        saw_login_prompt = False
+        idle_ready_cycles = 0
+
+        while time.monotonic() < deadline:
+            self._check_cancel("while switching account")
+            candidates = [page] if _page_alive(page) else []
+            if self._context and hasattr(self._context, "pages"):
+                candidates.extend(p for p in self._context.pages if p is not page and _page_alive(p))
+
+            ready_cand = None
+            any_not_ready = False
+            for cand in candidates:
+                u = self._live_url(cand)
+                if _is_login_url(u) or not self._ready_url(u):
+                    any_not_ready = True
+                    saw_not_ready = True
+                elif ready_cand is None:
+                    ready_cand = cand
+
+            if ready_cand is not None and not any_not_ready:
+                has_prompt = self._has_login_prompt(ready_cand)
+                if has_prompt:
+                    saw_login_prompt = True
+                    idle_ready_cycles = 0
+                else:
+                    idle_ready_cycles += 1
+                if not has_prompt and (saw_not_ready or saw_login_prompt or idle_ready_cycles >= 3):
+                    # Handle M365 landing page redirect to /chat
+                    u = self._live_url(ready_cand)
+                    if "cloud.microsoft" in u.lower() and not _is_login_url(u) and "chat" not in u.lower():
+                        try:
+                            ready_cand.goto(self.url, wait_until="domcontentloaded")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    self._page = ready_cand
+                    self._signed_in = True
+                    if self.browser_mode == "offscreen" and self._launched:
+                        self._set_window(ready_cand, onscreen=False)
+                        self._say("Signed in; the Edge window is off-screen again.")
+                    else:
+                        self._say("Signed in; account switch complete.")
+                    self._clear_composer(ready_cand)
+                    return True
+            else:
+                idle_ready_cycles = 0
+            time.sleep(1.0)
+
+        if self.browser_mode == "offscreen" and self._launched:
+            self._set_window(page, onscreen=False)
+        raise TimeoutError(f"Account sign-in was not completed within {timeout_seconds}s.")
 
     def _wait_for_sign_in(self, page, timeout_seconds: int) -> None:
         """Handle corporate SSO redirects. offscreen: show the window if sign-in needs the user."""

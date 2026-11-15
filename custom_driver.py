@@ -89,6 +89,10 @@ class CustomWebCopilotDriver(web.WebCopilotDriver):
     def _own_page_url(self, url: str) -> bool:
         return urlsplit(url or "").hostname == urlsplit(self.url).hostname
 
+    def _auth_domains(self) -> tuple[str, ...]:
+        host = (urlsplit(self.url).hostname or "").strip().lower()
+        return (host,) if host else ()
+
     def _say(self, text: str) -> None:
         if self.notify:
             try:

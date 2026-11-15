@@ -133,6 +133,9 @@ class GeminiWebDriver(web.WebCopilotDriver):
     def _own_page_url(self, url: str) -> bool:
         return "gemini.google.com" in (url or "").lower()
 
+    def _auth_domains(self) -> tuple[str, ...]:
+        return ("gemini.google.com", "accounts.google.com", "google.com")
+
     def _say(self, text: str) -> None:
         if self.notify:
             try:

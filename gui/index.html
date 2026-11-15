@@ -43,9 +43,9 @@
     <div class="welcome" id="welcome">
       <h2>Agent Neo</h2>
       <p class="tagline">Open and free agent harness for all LLM web chats</p>
-      <p>Ask for something in your workspace. The agent works through Copilot, Gemini, or WhatsApp and asks before it runs
-        anything. Slash commands: <code>/new</code>, <code>/fresh</code>, <code>/workspace</code>, <code>/backend</code>,
-        <code>/steps</code>, <code>/yolo</code>, <code>/skills</code>.</p>
+      <p>Ask for something in your workspace. The agent works through Copilot, Gemini, DeepSeek, or WhatsApp and asks before it runs
+        anything. Slash commands: <code>/new</code>, <code>/fresh</code>, <code>/switch-account</code>, <code>/workspace</code>, <code>/backend</code>,
+        <code>/steps</code>, <code>/yolo</code>, <code>/skills</code>, <code>/agents</code>, <code>/agent</code>.</p>
     </div>
   </main>
   <footer class="composer" id="composer" data-testid="composer">
@@ -55,6 +55,7 @@
     <div class="toolbelt">
       <div class="toolbelt-left">
         <button type="button" class="mini" id="new-chat" data-testid="new-chat" title="Start a new chat conversation (/new)">new chat</button>
+        <button type="button" class="mini" id="switch-account" data-testid="switch-account" title="Log out of the current web engine and switch accounts (/switch-account)">switch account</button>
         <button type="button" class="mini" id="reload" title="Reload neo.toml">reload</button>
         <button type="button" class="mini" id="settings" title="Open neo.toml in your editor">settings</button>
         <button type="button" class="mini" id="thinking" data-testid="thinking" title="Show the model's thinking lines">thinking</button>

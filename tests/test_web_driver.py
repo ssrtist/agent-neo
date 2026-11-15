@@ -116,6 +116,75 @@ class WebDriverTests(unittest.TestCase):
         self.assertFalse(d._ready_url("https://login.live.com/oauth20_authorize.srf"))
         self.assertTrue(web._is_login_url("https://accounts.google.com/v3/signin"))
         self.assertTrue(web._is_login_url("https://login.microsoftonline.com/common/oauth2"))
+        self.assertTrue(web._is_login_url("https://chat.deepseek.com/sign_in"))
+
+    def test_switch_account_headless_refused(self) -> None:
+        d = self._driver()
+        d.browser_mode = "headless"
+        with self.assertRaises(RuntimeError):
+            d.switch_account()
+
+    def test_switch_account_clears_only_engine_domains_and_surfaces_window(self) -> None:
+        import deepseek_web as deepseek
+
+        d = self._driver()
+        d._launched = True
+        d._signed_in = True
+        deleted: list[dict] = []
+        cleared_origins: list[str] = []
+        evaluated: list[str] = []
+        navigated: list[str] = []
+
+        class FakeCdp:
+            def send(self, method: str, params=None):
+                if method == "Network.getAllCookies":
+                    return {"cookies": [
+                        {"name": "copilot_tok", "domain": ".copilot.microsoft.com", "path": "/"},
+                        {"name": "ms_auth", "domain": "login.microsoftonline.com", "path": "/"},
+                        {"name": "gem_sid", "domain": ".gemini.google.com", "path": "/"},
+                        {"name": "other", "domain": ".example.com", "path": "/"},
+                    ]}
+                if method == "Network.deleteCookies":
+                    deleted.append(params)
+                elif method == "Storage.clearDataForOrigin":
+                    cleared_origins.append(params["origin"])
+                return {}
+
+            def detach(self) -> None:
+                pass
+
+        # Page transitions: initially on login URL, then back to ready chat URL on poll
+        urls = iter([LOGIN, LOGIN, "https://m365.cloud.microsoft/chat"])
+        page = SimpleNamespace(
+            url=LOGIN,
+            is_closed=lambda: False,
+            goto=lambda u, **_kw: navigated.append(u),
+            evaluate=lambda js: evaluated.append(js),
+        )
+        # Override _live_url progression cleanly
+        d._context = SimpleNamespace(
+            pages=[page],
+            new_cdp_session=lambda _p: FakeCdp(),
+        )
+        d._page = page
+        d._connect_page = lambda **_kw: page
+        d._live_url = lambda _p: next(urls, "https://m365.cloud.microsoft/chat")
+
+        with mock.patch.object(web.time, "sleep", return_value=None):
+            ok = d.switch_account(timeout_seconds=10)
+
+        self.assertTrue(ok)
+        self.assertTrue(d._signed_in)
+        self.assertEqual(navigated, [d.url])
+        deleted_names = [c["name"] for c in deleted]
+        self.assertEqual(deleted_names, ["copilot_tok", "ms_auth"])
+        self.assertNotIn("gem_sid", deleted_names)
+        self.assertNotIn("other", deleted_names)
+        self.assertNotIn("https://gemini.google.com", cleared_origins)
+        self.assertTrue(any("localStorage.clear()" in s for s in evaluated))
+        # Window shown on-screen then re-parked off-screen
+        self.assertEqual(d.windows, [True, False])
+        self.assertIn("deepseek.com", deepseek.DeepSeekWebDriver()._auth_domains())
 
 
 if __name__ == "__main__":

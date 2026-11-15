@@ -219,6 +219,9 @@ class WhatsAppWebDriver(web.WebCopilotDriver):
         u = (url or "").lower()
         return "whatsapp.com" in u or "wa.me" in u
 
+    def _auth_domains(self) -> tuple[str, ...]:
+        return ("whatsapp.com", "wa.me")
+
     def _say(self, text: str) -> None:
         if self.notify:
             try:

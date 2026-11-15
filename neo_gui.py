@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import unquote, urlparse
 
-from neo_core import Agent, discover_skills
+from neo_core import Agent, discover_agents, discover_skills
 from neo_events import Cancelled, SessionLog, dedupe_status, fanout, public
 from neo_settings import (
     BACKEND_ALIASES,
@@ -53,7 +53,7 @@ REPO = Path(__file__).resolve().parent
 GUI_DIR = REPO / "gui"
 TAURI_DIR = REPO / "tauri"
 EVENT_CHANNEL = "neo:event"
-WEB_BACKENDS = ("copilot", "web", "gemini", "whatsapp", "auto", "custom")
+WEB_BACKENDS = ("copilot", "web", "gemini", "deepseek", "whatsapp", "auto", "custom")
 
 # open_external: workspace files of these (document-like) types open with their default app directly; every other
 # type asks first (code review r1: a denylist missed .chm/.msc/... that run code when opened). Reveal never asks.
@@ -359,6 +359,9 @@ class GuiSession:
             return {"ok": False, "error": f"unknown backend {backend!r}"}
         return self.queue_job(("backend", norm), "switching backend")
 
+    def switch_account(self) -> dict[str, Any]:
+        return self.queue_job(("switch_account",), "switching account")
+
     def set_option(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             if "show_thinking" in body:
@@ -490,6 +493,8 @@ class GuiSession:
             return self.queue_job(("new_chat",), "starting a new chat")
         if cmd == "/fresh":
             return self.queue_job(("fresh",), "recycling the browser")
+        if cmd in ("/switch-account", "/logout"):
+            return self.switch_account()
         if cmd in ("/workspace", "/cd"):
             if not arg:
                 self.notice(f"Current workspace: {self.workspace}  (usage: /workspace <path>)")
@@ -498,7 +503,7 @@ class GuiSession:
         if cmd == "/backend":
             norm = BACKEND_ALIASES.get(arg.lower(), arg.lower())
             if norm not in BACKENDS:
-                self.notice("Usage: /backend <copilot|gemini|whatsapp|desktop|auto|custom>", "warn")
+                self.notice("Usage: /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>", "warn")
                 return {"ok": False}
             return self.set_backend(norm)
         if cmd == "/steps":
@@ -515,9 +520,48 @@ class GuiSession:
                         "warn" if self.yolo else "info")
             return {"ok": True}
         if cmd == "/skills":
-            skills = self.agent.skills if self.agent else discover_skills(self.workspace)
+            skills = discover_skills(self.workspace, backend=self.backend)
+            if self.agent is not None:
+                self.agent.skills = skills
             self.notice(f"Skills ({len(skills)}): " + (", ".join(skills) or "none"))
             return {"ok": True}
+        if cmd == "/agents":
+            agents = discover_agents(self.workspace, backend=self.backend)
+            if self.agent is not None:
+                self.agent.agents = agents
+            items = []
+            for k, v in agents.items():
+                atools = v.get("allowed_tools")
+                tools_str = ", ".join(sorted(atools)) if atools is not None else "all"
+                items.append(f"{k} [{tools_str}]: {v['description']}")
+            self.notice(f"Agents ({len(agents)}): " + ("; ".join(items) or "none"))
+            return {"ok": True}
+        if cmd == "/agent":
+            aparts = arg.split(maxsplit=1)
+            if len(aparts) < 2 or not aparts[1].strip():
+                self.notice("Usage: /agent <name> <task>", "warn")
+                return {"ok": False}
+            agents = discover_agents(self.workspace, backend=self.backend)
+            if self.agent is not None:
+                self.agent.agents = agents
+            target_name = aparts[0].strip()
+            spec = agents.get(target_name)
+            if spec is None:
+                low = target_name.lower()
+                spec = next((v for k, v in agents.items() if k.lower() == low), None)
+            if spec is None:
+                avail = ", ".join(sorted(agents)) or "none"
+                self.notice(f"Unknown agent {target_name!r}. Available: {avail}", "warn")
+                return {"ok": False}
+            with self.lock:
+                if self.running or self.busy:
+                    return {"ok": False, "error": "busy"}
+                if self.settings_error:
+                    return {"ok": False, "error": "settings", "message": self.settings_error}
+                self.running = True
+            self.jobs.put(("agent_turn", spec["name"], aparts[1].strip()))
+            self.push_state()
+            return {"ok": True, "agent": spec["name"]}
         if cmd == "/tasks":
             if self.agent is None:
                 self.notice("No active tasks or watches.")
@@ -563,7 +607,7 @@ class GuiSession:
                 return {"ok": False, **res}
             self.notice(f"Cancelled watches: {', '.join(res.get('cancelled', [])) or 'none'}")
             return {"ok": True, **res}
-        self.notice("Commands: /new, /fresh, /workspace [path], /backend <copilot|gemini|whatsapp|desktop|auto|custom>, /steps [N], /yolo, /skills, /tasks, /watch, /unwatch",
+        self.notice("Commands: /new, /fresh, /switch-account, /workspace [path], /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>, /steps [N], /yolo, /skills, /agents, /agent <name> <task>, /tasks, /watch, /unwatch",
                     "info" if cmd == "/help" else "warn")
         return {"ok": cmd == "/help"}
 
@@ -639,13 +683,16 @@ class GuiSession:
                         self.agent.close()
                     self._close_driver()
                     return
-                if kind == "turn":
+                if kind in ("turn", "agent_turn"):
                     try:
                         agent = self._ensure_agent()
                     except Exception as exc:  # noqa: BLE001
                         self.notice(f"Could not start the {self.backend} backend: {type(exc).__name__}: {exc}", "error")
                         continue
-                    agent.run_turn(job[1])
+                    if kind == "agent_turn":
+                        agent.run_agent_turn(job[1], job[2])
+                    else:
+                        agent.run_turn(job[1])
                 elif kind == "new_chat":
                     with self.lock:
                         self.wakeup_queue.clear()
@@ -667,6 +714,21 @@ class GuiSession:
                         if self.driver is not None:
                             self.driver.new_conversation()
                         self.notice("Started fresh conversation.")
+                elif kind == "switch_account":
+                    with self.lock:
+                        self.wakeup_queue.clear()
+                    if self.agent is not None:
+                        self.agent.close()
+                    if self.driver is None:
+                        self.driver = self._make_driver(self.backend)
+                    if not hasattr(self.driver, "switch_account"):
+                        self.notice(f"{type(self.driver).__name__} does not support switch account.", "warn")
+                    else:
+                        try:
+                            self.driver.switch_account()
+                            self.notice("Account switched and signed in.")
+                        except Cancelled:
+                            self.notice("Account switch cancelled.")
                 elif kind == "backend":
                     with self.lock:
                         self.wakeup_queue.clear()
@@ -677,13 +739,16 @@ class GuiSession:
                     self.driver = new
                     with self.lock:
                         self.backend = job[1]
+                    if self.agent is not None:
+                        self.agent.skills = discover_skills(self.workspace, backend=job[1])
+                        self.agent.agents = discover_agents(self.workspace, backend=job[1])
                     self.notice(f"Switched backend to {type(new).__name__}.")
             except Exception as exc:  # noqa: BLE001 - a failed job must not kill the worker
                 _log_error(traceback.format_exc())
                 self.notice(f"{kind} failed: {type(exc).__name__}: {exc}", "error")
             finally:
                 with self.lock:
-                    if kind == "turn":
+                    if kind in ("turn", "agent_turn"):
                         self.running = False
                         next_p = None
                         if self.queued_prompt:
@@ -826,6 +891,10 @@ def main(argv: list[str] | None = None) -> int:
         return Body(session.queue_job(("fresh",), "recycling the browser"))
 
     @commands.command()
+    async def switch_account(body: Body, app_handle: AppHandle) -> Body:
+        return Body(session.switch_account())
+
+    @commands.command()
     async def set_workspace(body: Body, app_handle: AppHandle) -> Body:
         return Body(session.set_workspace(str(body_dict(body).get("path", ""))))
 
@@ -868,6 +937,11 @@ def main(argv: list[str] | None = None) -> int:
         "minHeight": 420,
         "dragDropEnabled": False,   # Tauri's OS file-drop handler otherwise swallows in-page HTML5 drag-and-drop
     }
+    extra_browser_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "").strip()
+    if extra_browser_args:
+        # WebView2 150+ drops WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS when the host process runs elevated;
+        # forwarding via Tauri's window config uses CoreWebView2EnvironmentOptions directly instead.
+        window["additionalBrowserArgs"] = extra_browser_args
     tauri_config = {"version": __version__, "app": {"windows": [window]}}
     from pytauri.ffi import RunEvent
 

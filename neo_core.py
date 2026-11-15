@@ -86,8 +86,8 @@ Rules:
 """.strip()
 
 SUBAGENT_TOOL_LINE = (
-    '{"type":"tool","name":"run_subagent","arguments":{"task":"self-contained sub-task","context":"facts the sub-agent needs"}}\n'
-    "(run_subagent runs the task in a separate conversation, one at a time, and returns the sub-agent's final message.)\n"
+    '{"type":"tool","name":"run_subagent","arguments":{"task":"self-contained sub-task","context":"facts the sub-agent needs","agent":"optional-agent-name"}}\n'
+    "(run_subagent runs the task in a separate conversation, one at a time, and returns the sub-agent's final message; omit 'agent' for a general sub-agent.)\n"
 )
 
 ENVIRONMENT_AWARENESS = r"""
@@ -105,8 +105,64 @@ You cannot start further sub-agents.
 """.strip()
 
 APPROVAL_TOOLS = {"write_file", "edit_file", "delete_file", "run_shell"}
+ALL_AGENT_TOOLS: frozenset[str] = frozenset({
+    "load_skill",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "run_shell",
+    "list_dir",
+    "grep_search",
+    "web_fetch",
+    "ask_user",
+    "read_task",
+    "wait_task",
+    "list_tasks",
+    "watch_task",
+    "unwatch_task",
+    "kill_task",
+})
+CLAUDE_TO_NEO_TOOLS: dict[str, tuple[str, ...]] = {
+    "read": ("read_file",),
+    "view": ("read_file",),
+    "read_file": ("read_file",),
+    "write": ("write_file",),
+    "create": ("write_file",),
+    "write_file": ("write_file",),
+    "edit": ("edit_file",),
+    "multiedit": ("edit_file",),
+    "str_replace": ("edit_file",),
+    "edit_file": ("edit_file",),
+    "delete": ("delete_file",),
+    "delete_file": ("delete_file",),
+    "bash": ("run_shell", "read_task", "wait_task", "list_tasks", "kill_task"),
+    "shell": ("run_shell", "read_task", "wait_task", "list_tasks", "kill_task"),
+    "powershell": ("run_shell", "read_task", "wait_task", "list_tasks", "kill_task"),
+    "run_shell": ("run_shell",),
+    "grep": ("grep_search",),
+    "ripgrep": ("grep_search",),
+    "rg": ("grep_search",),
+    "grep_search": ("grep_search",),
+    "glob": ("list_dir",),
+    "ls": ("list_dir",),
+    "find": ("list_dir",),
+    "list_dir": ("list_dir",),
+    "webfetch": ("web_fetch",),
+    "web_fetch": ("web_fetch",),
+    "askuserquestion": ("ask_user",),
+    "ask_user": ("ask_user",),
+    "skill": ("load_skill",),
+    "load_skill": ("load_skill",),
+    "read_task": ("read_task",),
+    "wait_task": ("wait_task",),
+    "list_tasks": ("list_tasks",),
+    "watch_task": ("watch_task",),
+    "unwatch_task": ("unwatch_task",),
+    "kill_task": ("kill_task",),
+}
 _ACTION_TYPES = ("tool", "tools", "final")
-_UI_PREFIX_RE = re.compile(r"^\s*(?:Copilot said:|Gemini said:?|Model said:?|WhatsApp said:?)\s*", re.I)
+_UI_PREFIX_RE = re.compile(r"^\s*(?:Copilot said:|Gemini said:?|DeepSeek said:?|Model said:?|WhatsApp said:?)\s*", re.I)
 _THOUGHT_MAX = 500
 
 
@@ -295,21 +351,70 @@ def parse_action(text: str) -> Any:
     return json.loads(stripped[start:] if start >= 0 else stripped)
 
 
+_TOOL_DOC_LINES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ('{"type":"tool","name":"load_skill"', ("load_skill",)),
+    ('{"type":"tool","name":"read_file"', ("read_file",)),
+    ('{"type":"tool","name":"write_file"', ("write_file",)),
+    ('{"type":"tool","name":"edit_file"', ("edit_file",)),
+    ('{"type":"tool","name":"delete_file"', ("delete_file",)),
+    ('{"type":"tool","name":"run_shell"', ("run_shell",)),
+    ("- read_file supports", ("read_file",)),
+    ("- list_dir:", ("list_dir",)),
+    ("- grep_search:", ("grep_search",)),
+    ("- edit_file supports", ("edit_file",)),
+    ("- ask_user:", ("ask_user",)),
+    ("- web_fetch:", ("web_fetch",)),
+    ("- run_shell optional timeout:", ("run_shell",)),
+    ("- run_shell background:", ("run_shell",)),
+    ("- watch_task / unwatch_task:", ("watch_task", "unwatch_task")),
+    ("- When write_file or edit_file", ("write_file", "edit_file")),
+)
+
+
+def _filter_base_instructions(base: str, allowed_tools: frozenset[str]) -> str:
+    kept: list[str] = []
+    for line in base.splitlines():
+        matched_tools: tuple[str, ...] | None = None
+        for prefix, tools in _TOOL_DOC_LINES:
+            if line.startswith(prefix):
+                matched_tools = tools
+                break
+        if matched_tools is None or any(t in allowed_tools for t in matched_tools):
+            kept.append(line)
+    return "\n".join(kept)
+
+
 def build_system_prompt(
     skills: dict[str, dict[str, Any]],
     *,
     subagents: bool = False,
     environment_awareness: bool = False,
     custom_instructions: str = "",
+    agents: dict[str, dict[str, Any]] | None = None,
+    allowed_tools: frozenset[str] | None = None,
+    persona: dict[str, Any] | None = None,
 ) -> str:
     base = BASE_SYSTEM_INSTRUCTIONS.replace("{SUBAGENT_TOOL}\n", SUBAGENT_TOOL_LINE if subagents else "")
+    if allowed_tools is not None:
+        base = _filter_base_instructions(base, allowed_tools)
     lines = [base]
+    if allowed_tools is not None:
+        allowed_str = ", ".join(sorted(allowed_tools)) if allowed_tools else "none"
+        lines.append(f"\nALLOWED TOOLS ONLY: {allowed_str}. Calling any other tool will fail.")
     if environment_awareness:
         lines.append("\n" + ENVIRONMENT_AWARENESS)
-    if skills:
+    if persona and str(persona.get("body", "")).strip():
+        lines.append(f"\nACTIVE AGENT PERSONA ({persona.get('name', 'agent')}):\n" + str(persona["body"]).strip())
+    if skills and (allowed_tools is None or "load_skill" in allowed_tools):
         lines.append("\nAVAILABLE SKILLS (use load_skill to inspect instructions):")
         for sname, sinfo in skills.items():
             lines.append(f"- {sname}: {sinfo['description']}")
+    if subagents and agents:
+        lines.append("\nAVAILABLE SUB-AGENTS (pass optional \"agent\" to run_subagent, or omit for a general sub-agent):")
+        for aname, ainfo in agents.items():
+            atools = ainfo.get("allowed_tools")
+            tools_label = ", ".join(sorted(atools)) if atools is not None else "all"
+            lines.append(f"- {aname}: {ainfo['description']} [tools: {tools_label}]")
     if custom_instructions.strip():
         lines.append("\nADDITIONAL INSTRUCTIONS FROM THE USER'S agent-neo SETTINGS:\n" + custom_instructions.rstrip())
     return "\n".join(lines)
@@ -324,7 +429,9 @@ def tool_summary(name: str, args: Any) -> str:
     elif name == "load_skill":
         value = args.get("name", "")
     elif name == "run_subagent":
-        value = args.get("task", "")
+        aname = args.get("agent") or args.get("persona") or ""
+        task = args.get("task", "")
+        value = f"[{aname}] {task}" if aname else task
     elif name == "list_dir":
         value = args.get("path", "") or "."
     elif name == "grep_search":
@@ -346,7 +453,7 @@ def tool_summary(name: str, args: Any) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()[:160]
 
 
-# --------------------------------------------------------------------------- workspace + skills
+# --------------------------------------------------------------------------- workspace + skills + agents
 
 
 def safe_path(root: Path, relative_path: str) -> Path:
@@ -368,6 +475,167 @@ def _is_protected_workspace_path(root: Path, relative_path: str) -> bool:
     return bool(rel.parts) and rel.parts[0].lower() in (".agent-neo", ".neo", ".git")
 
 
+def _user_tier_dirs(leaf: str, backend: str, home: Path) -> list[Path]:
+    """Return engine-prioritized user-home directories for skills or agents."""
+    b = (backend or "").lower().strip()
+    dirs: list[Path] = []
+    if b in ("copilot", "web", "desktop", "auto"):
+        dirs.append(home / ".copilot" / leaf)
+    elif b == "gemini":
+        dirs.append(home / ".gemini" / leaf)
+        dirs.append(home / ".antigravity" / leaf)
+    elif b == "deepseek":
+        dirs.append(home / ".deepseek" / leaf)
+    elif b == "whatsapp":
+        dirs.append(home / ".whatsapp" / leaf)
+
+    dirs.extend([
+        home / ".agent-neo" / leaf,
+        home / ".neo" / leaf,
+    ])
+
+    all_fallback = [
+        home / ".copilot" / leaf,
+        home / ".gemini" / leaf,
+        home / ".antigravity" / leaf,
+        home / ".deepseek" / leaf,
+        home / ".whatsapp" / leaf,
+        home / ".claude" / leaf,
+        home / ".agents" / leaf,
+    ]
+    for d in all_fallback:
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _split_frontmatter(content: str) -> tuple[dict[str, Any], str, bool]:
+    m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n?(.*)$", content, re.DOTALL)
+    if not m:
+        return {}, content, False
+    meta = yaml.safe_load(m.group(1))
+    return (meta if isinstance(meta, dict) else {}), m.group(2), True
+
+
+def _parse_tool_tokens(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items = [part.strip() for part in raw.split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        items = [str(part).strip() for part in raw]
+    else:
+        return []
+    out: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        # Strip optional Claude-style argument constraints like Bash(git status)
+        tok = re.sub(r"\(.*\)$", "", item).strip()
+        if tok:
+            out.append(tok)
+    return out
+
+
+def _map_agent_tools(raw_tools: Any, raw_disallowed: Any) -> frozenset[str] | None:
+    """Resolve Claude/Copilot agent frontmatter tools & disallowedTools to Agent Neo tool names."""
+    has_tools = raw_tools is not None
+    has_disallowed = raw_disallowed is not None
+    if not has_tools and not has_disallowed:
+        return None
+
+    allowed: set[str]
+    if not has_tools:
+        allowed = set(ALL_AGENT_TOOLS)
+    else:
+        tokens = _parse_tool_tokens(raw_tools)
+        if any(t == "*" for t in tokens):
+            allowed = set(ALL_AGENT_TOOLS)
+        else:
+            allowed = set()
+            for tok in tokens:
+                mapped = CLAUDE_TO_NEO_TOOLS.get(tok.lower())
+                if mapped:
+                    allowed.update(mapped)
+
+    if has_disallowed:
+        for tok in _parse_tool_tokens(raw_disallowed):
+            if tok == "*":
+                allowed.clear()
+                break
+            mapped = CLAUDE_TO_NEO_TOOLS.get(tok.lower())
+            if mapped:
+                allowed.difference_update(mapped)
+
+    allowed.discard("run_subagent")
+    return frozenset(allowed)
+
+
+def parse_agent_markdown(path: Path) -> dict[str, Any] | None:
+    """Parse one Claude/Copilot-compatible agent .md or .agent.md file."""
+    content = path.read_text(encoding="utf-8")
+    meta, body, has_fm = _split_frontmatter(content)
+    if path.name.lower() == "readme.md" and not has_fm:
+        return None
+    stem = path.name[:-9] if path.name.lower().endswith(".agent.md") else path.stem
+    name = str(meta.get("name") or stem).strip() or stem
+    description = str(meta.get("description") or f"Sub-agent persona: {name}").strip()
+    model = str(meta.get("model") or "").strip()
+    raw_max = meta.get("maxTurns", meta.get("max_turns", meta.get("max_steps")))
+    max_turns: int | None = None
+    if raw_max is not None and not isinstance(raw_max, bool):
+        try:
+            val = int(raw_max)
+            if val > 0:
+                max_turns = val
+        except (TypeError, ValueError):
+            pass
+    raw_tools = meta.get("tools") if "tools" in meta else None
+    raw_disallowed = meta.get("disallowedTools", meta.get("disallowed_tools"))
+    allowed_tools = _map_agent_tools(raw_tools, raw_disallowed)
+    return {
+        "name": name,
+        "description": description,
+        "model": model,
+        "max_turns": max_turns,
+        "allowed_tools": allowed_tools,
+        "meta": meta,
+        "body": body.strip(),
+        "path": path,
+    }
+
+
+def discover_agents(root: Path, backend: str = "copilot", home: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Discover Claude/Copilot-compatible sub-agent personas across workspace and user home."""
+    agents: dict[str, dict[str, Any]] = {}
+    home_dir = home if home is not None else Path.home()
+    workspace_dirs = [
+        root / ".agent-neo" / "agents",
+        root / ".neo" / "agents",
+        root / ".github" / "agents",
+        root / ".claude" / "agents",
+        root / "agents",
+    ]
+    search_dirs = workspace_dirs + _user_tier_dirs("agents", backend, home_dir)
+    for parent in search_dirs:
+        if not parent.is_dir():
+            continue
+        try:
+            files = sorted(parent.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for child in files:
+            if not child.is_file() or not child.name.lower().endswith(".md"):
+                continue
+            try:
+                spec = parse_agent_markdown(child)
+            except Exception:
+                continue
+            if spec and spec["name"] not in agents:
+                agents[spec["name"]] = spec
+    return agents
+
+
 def discover_skills(root: Path, backend: str = "copilot") -> dict[str, dict[str, Any]]:
     """Discover available SKILL.md definitions across workspace and user skills with engine prioritization."""
     skills: dict[str, dict[str, Any]] = {}
@@ -383,38 +651,7 @@ def discover_skills(root: Path, backend: str = "copilot") -> dict[str, dict[str,
     ]
 
     # 2. Tier 2: User profile skills with engine prioritization
-    b = (backend or "").lower().strip()
-    user_engine_dirs: list[Path] = []
-
-    # Native engine first
-    if b in ("copilot", "web", "desktop", "auto"):
-        user_engine_dirs.append(home / ".copilot" / "skills")
-    elif b == "gemini":
-        user_engine_dirs.append(home / ".gemini" / "skills")
-        user_engine_dirs.append(home / ".antigravity" / "skills")
-    elif b == "whatsapp":
-        user_engine_dirs.append(home / ".whatsapp" / "skills")
-
-    # Agent Neo own user skills
-    user_engine_dirs.extend([
-        home / ".agent-neo" / "skills",
-        home / ".neo" / "skills",
-    ])
-
-    # Fallback engines in order: copilot -> gemini -> whatsapp -> others
-    all_fallback = [
-        home / ".copilot" / "skills",
-        home / ".gemini" / "skills",
-        home / ".antigravity" / "skills",
-        home / ".whatsapp" / "skills",
-        home / ".claude" / "skills",
-        home / ".agents" / "skills",
-    ]
-    for d in all_fallback:
-        if d not in user_engine_dirs:
-            user_engine_dirs.append(d)
-
-    search_dirs = workspace_dirs + user_engine_dirs
+    search_dirs = workspace_dirs + _user_tier_dirs("skills", backend, home)
 
     for parent in search_dirs:
         if not parent.is_dir():
@@ -427,13 +664,7 @@ def discover_skills(root: Path, backend: str = "copilot") -> dict[str, dict[str,
                 continue
             try:
                 content = skill_md.read_text(encoding="utf-8")
-                m = re.match(r"^---\r?\n(.*?)\r?\n---\r?\n(.*)$", content, re.DOTALL)
-                if m:
-                    meta = yaml.safe_load(m.group(1)) or {}
-                    body = m.group(2)
-                else:
-                    meta = {}
-                    body = content
+                meta, body, _ = _split_frontmatter(content)
                 name = meta.get("name", child.name)
                 # First match wins (workspace beats user, native engine beats fallback engines)
                 if name not in skills:
@@ -1261,6 +1492,9 @@ class Agent:
         approver: Approver = deny_all,
         *,
         skills: dict[str, dict[str, Any]] | None = None,
+        agents: dict[str, dict[str, Any]] | None = None,
+        allowed_tools: frozenset[str] | None = None,
+        persona: dict[str, Any] | None = None,
         cancel: CancelToken | None = None,
         depth: int = 0,
         on_wakeup: Callable[[dict[str, Any]], None] | None = None,
@@ -1270,7 +1504,11 @@ class Agent:
         self.settings = settings
         self.sink = sink
         self.approver = approver
-        self.skills = discover_skills(self.root, backend=getattr(settings, "backend", "copilot")) if skills is None else skills
+        backend = getattr(settings, "backend", "copilot")
+        self.skills = discover_skills(self.root, backend=backend) if skills is None else skills
+        self.agents = discover_agents(self.root, backend=backend) if agents is None else agents
+        self.allowed_tools = allowed_tools
+        self.persona = persona
         self.cancel = cancel or CancelToken()
         self.depth = depth
         self.events = EventFactory()
@@ -1306,7 +1544,9 @@ class Agent:
     def set_workspace(self, root: Path) -> None:
         self.root = Path(root).resolve()
         self.task_manager.root = self.root
-        self.skills = discover_skills(self.root, backend=getattr(self.settings, "backend", "copilot"))
+        backend = getattr(self.settings, "backend", "copilot")
+        self.skills = discover_skills(self.root, backend=backend)
+        self.agents = discover_agents(self.root, backend=backend)
 
     def close(self) -> None:
         """Stop all background tasks and reactive watches owned by this agent."""
@@ -1318,13 +1558,33 @@ class Agent:
         self.hard_ceiling = settings.hard_ceiling
         self.auto_approve = settings.auto_approve
         self._custom = read_custom_instructions(settings)
+        backend = getattr(settings, "backend", "copilot")
+        self.skills = discover_skills(self.root, backend=backend)
+        self.agents = discover_agents(self.root, backend=backend)
+
+    def resolve_agent(self, name: str) -> dict[str, Any] | None:
+        """Find a discovered sub-agent persona by exact or case-insensitive name."""
+        key = (name or "").strip()
+        if not key:
+            return None
+        if key in self.agents:
+            return self.agents[key]
+        low = key.lower()
+        for k, v in self.agents.items():
+            if k.lower() == low:
+                return v
+        return None
 
     def system_prompt(self) -> str:
+        sub_enabled = self.settings.enable_subagents and self.depth == 0
         return build_system_prompt(
             self.skills,
-            subagents=self.settings.enable_subagents and self.depth == 0,
+            subagents=sub_enabled,
             environment_awareness=self.settings.environment_awareness,
             custom_instructions=self._custom,
+            agents=self.agents if sub_enabled else None,
+            allowed_tools=self.allowed_tools,
+            persona=self.persona,
         )
 
     def _check_cancel(self) -> None:
@@ -1472,6 +1732,34 @@ class Agent:
         outcome, _ = self._guarded(lambda: self._loop(self.first_prompt(user_text), user_text, pause=True))
         return outcome
 
+    def run_agent_turn(self, agent_name: str, task: str) -> str:
+        """Run one top-level user turn under a named sub-agent persona and its tool allowlist."""
+        spec = self.resolve_agent(agent_name)
+        if spec is None:
+            self.events.turn = (self.events.turn or 0) + 1
+            self.cancel.clear()
+            self.emit("turn_start", text=task, workspace=str(self.root))
+            self.emit("error", message=f"Unknown agent persona {agent_name!r}.", fatal=True)
+            self.emit("turn_end", outcome="error")
+            return "error"
+        old_persona = self.persona
+        old_allowed = self.allowed_tools
+        old_ceiling = self.hard_ceiling
+        old_chunk = self.step_chunk
+        self.persona = spec
+        self.allowed_tools = spec.get("allowed_tools")
+        max_turns = spec.get("max_turns")
+        if max_turns:
+            self.hard_ceiling = max_turns
+            self.step_chunk = max_turns
+        try:
+            return self.run_turn(task)
+        finally:
+            self.persona = old_persona
+            self.allowed_tools = old_allowed
+            self.hard_ceiling = old_ceiling
+            self.step_chunk = old_chunk
+
     def _guarded(self, body: Callable[[], tuple[str, str]]) -> tuple[str, str]:
         message = ""
         try:
@@ -1553,7 +1841,14 @@ class Agent:
                     try:
                         if not isinstance(args, dict):
                             raise TypeError("tool arguments must be a JSON object")
-                        if name == "run_subagent":
+                        if self.allowed_tools is not None and name not in self.allowed_tools:
+                            allowed_list = ", ".join(sorted(self.allowed_tools)) if self.allowed_tools else "none"
+                            result = (
+                                f"ERROR: Tool {name!r} is not permitted for this agent persona. "
+                                f"Allowed tools: {allowed_list}."
+                            )
+                            ok = False
+                        elif name == "run_subagent":
                             result, ok = self._run_subagent(args, step)
                         else:
                             result = execute_tool(
@@ -1661,11 +1956,19 @@ class Agent:
         task = str(args.get("task", "")).strip()
         if not task:
             return "ERROR: run_subagent needs a non-empty 'task'.", False
+        agent_name = str(args.get("agent") or args.get("persona") or "").strip()
+        spec: dict[str, Any] | None = None
+        if agent_name:
+            spec = self.resolve_agent(agent_name)
+            if spec is None:
+                avail = ", ".join(sorted(self.agents)) or "none"
+                return f"ERROR: Unknown sub-agent persona {agent_name!r}. Available: {avail}.", False
         context = str(args.get("context", "")).strip()
         self._sub_counter += 1
         sub_id = f"sub-{self.events.turn or 0}-{self._sub_counter}"
+        extra_sub = {"agent": spec["name"]} if spec else {}
         self.emit("subagent_start", sub_id=sub_id, task=truncate(task, PREVIEW_CHARS),
-                  context=truncate(context, PREVIEW_CHARS), step=step)
+                  context=truncate(context, PREVIEW_CHARS), step=step, **extra_sub)
 
         def wrap(event: dict[str, Any]) -> None:
             self.emit("subagent_event", sub_id=sub_id, event=event, step=step)
@@ -1677,11 +1980,17 @@ class Agent:
             self.emit("subagent_end", sub_id=sub_id, outcome="error", message=truncate(message, PREVIEW_CHARS), step=step)
             return f"ERROR: the sub-agent did not start ({message}).", False
         child_settings = replace(self.settings, enable_subagents=False)
-        child = Agent(child_driver, self.root, child_settings, wrap, self.approver,
-                      skills=self.skills, cancel=self.cancel, depth=self.depth + 1)
+        child = Agent(
+            child_driver, self.root, child_settings, wrap, self.approver,
+            skills=self.skills, agents=self.agents,
+            allowed_tools=spec.get("allowed_tools") if spec else None,
+            persona=spec,
+            cancel=self.cancel, depth=self.depth + 1,
+        )
         child.parent = self
-        child.hard_ceiling = self.settings.subagent_max_steps
-        child.step_chunk = self.settings.subagent_max_steps
+        max_steps = (spec.get("max_turns") if spec and spec.get("max_turns") else self.settings.subagent_max_steps)
+        child.hard_ceiling = max_steps
+        child.step_chunk = max_steps
         child.retry_delay = self.retry_delay
         try:
             outcome, message = child.run_child(task, context)

@@ -27,7 +27,8 @@ environment_awareness = true
 custom_instructions_file = ""
 
 # Chat backend: "copilot" (default: M365 or Consumer Copilot Web; alias "web") |
-# "gemini" (Google Gemini Web) | "whatsapp" (WhatsApp Web 1:1 LLM Chat) |
+# "gemini" (Google Gemini Web) | "deepseek" (DeepSeek Chat Web) |
+# "whatsapp" (WhatsApp Web 1:1 LLM Chat, experimental/disabled by default) |
 # "desktop" (M365 or Consumer Copilot Windows App) | "auto" | "custom" (any web chat page:
 # see [custom_backend] at the end of this file).
 backend = "copilot"

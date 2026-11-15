@@ -22,7 +22,7 @@ from typing import Any
 
 SETTINGS_FILE = "neo.toml"
 ALT_SETTINGS_FILE = "agent-neo.toml"
-BACKENDS = ("copilot", "gemini", "whatsapp", "desktop", "auto", "custom")
+BACKENDS = ("copilot", "gemini", "deepseek", "whatsapp", "desktop", "auto", "custom")
 BACKEND_ALIASES = {"web": "copilot"}
 BROWSER_MODES = ("offscreen", "visible", "headless")
 

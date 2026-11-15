@@ -80,11 +80,15 @@ class GuiFeaturesTests(unittest.TestCase):
         html = (REPO / "gui" / "index.html").read_text(encoding="utf-8")
         self.assertIn('id="ws-browse"', html)
         self.assertIn('id="ws-pill"', html)
+        self.assertIn('id="switch-account"', html)
         self.assertIn('class="toolbelt"', html)
         self.assertIn('class="toolbelt-left"', html)
         self.assertIn('class="toolbelt-right"', html)
         self.assertIn('Open and free agent harness for all LLM web chats', html)
         self.assertNotIn('Agent Neo (agent-neo):', html)
+
+        app_js = (REPO / "gui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("switch_account", app_js)
 
     def test_gui_session_wakeup_queues_when_busy_and_runs_when_idle(self) -> None:
         self.session.running = True
@@ -120,6 +124,41 @@ class GuiFeaturesTests(unittest.TestCase):
         res_unwatch = self.session.slash("/unwatch")
         self.assertTrue(res_unwatch.get("ok"))
         self.assertEqual(self.session.agent.task_manager.list_tasks()["watches"], [])
+
+    def test_gui_agents_and_switch_account_slash_commands(self) -> None:
+        agents_dir = self.ws / "agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        (agents_dir / "planner.agent.md").write_text(
+            "---\nname: planner\ndescription: Read-only planner\ntools: Read, Glob\n---\nPlan only.\n",
+            encoding="utf-8",
+        )
+        res_list = self.session.slash("/agents")
+        self.assertTrue(res_list.get("ok"))
+
+        fake_jobs: list[tuple] = []
+        orig_jobs = self.session.jobs
+        self.session.jobs = MagicMock()
+        self.session.jobs.put.side_effect = fake_jobs.append
+        try:
+            res_run = self.session.slash("/agent planner inspect structure")
+            self.assertTrue(res_run.get("ok"), res_run)
+            self.assertTrue(self.session.running)
+            self.session.running = False
+
+            res_bad = self.session.slash("/agent missing do work")
+            self.assertFalse(res_bad.get("ok"))
+
+            res_sw = self.session.slash("/switch-account")
+            self.assertTrue(res_sw.get("ok"), res_sw)
+            self.assertEqual(self.session.busy, "switching account")
+            self.session.busy = ""
+        finally:
+            self.session.jobs = orig_jobs
+
+        self.assertEqual(fake_jobs, [
+            ("agent_turn", "planner", "inspect structure"),
+            ("switch_account",),
+        ])
 
 
 if __name__ == "__main__":

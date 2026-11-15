@@ -68,6 +68,7 @@ function applyState(s) {
   if (!shownStartupWarnings) { shownStartupWarnings = true; for (const w of s.settings_warnings || []) notice(w, 'warn'); }
   const busy = !!s.busy;
   $('send').disabled = busy;
+  $('switch-account').disabled = busy || !!s.running;
   $('stop').hidden = !s.running;
   $('hint').textContent = s.busy ? s.busy + '…' : s.running ? 'Working… (Enter queues, Ctrl+Enter steers, Stop ends turn)' : '';
   if (thinkingChanged) for (const id of turnEls.keys()) renderTurn(id);
@@ -542,6 +543,7 @@ $('yolo').onclick = () => invoke('set_option', { yolo: !st.yolo });
 $('settings').onclick = () => invoke('open_settings');
 $('reload').onclick = () => invoke('reload_settings');
 $('new-chat').onclick = () => invoke('new_chat');
+$('switch-account').onclick = () => invoke('switch_account');
 
 // ------------------------------------------------------------------ colour theme (plan v0.5 D4)
 // theme-boot.js applied the saved theme before first paint; this keeps the header dropdown in step and saves changes.

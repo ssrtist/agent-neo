@@ -11,6 +11,7 @@
 | `copilot` (default; alias `web`) | Microsoft 365 Copilot (`https://m365.cloud.microsoft/chat`) or consumer Copilot (`https://copilot.microsoft.com`) | Playwright over CDP in a dedicated Edge profile |
 | `gemini` | Google Gemini (`https://gemini.google.com/app`) | Same dedicated Edge profile |
 | `deepseek` | DeepSeek Chat (`https://chat.deepseek.com/`) | Same dedicated Edge profile; `<think>` reasoning becomes the step's thought |
+| `whatsapp` | WhatsApp Web (`https://web.whatsapp.com/send/?phone=...`) | Same dedicated Edge profile (experimental, disabled by default) |
 | `desktop` | `M365Copilot.exe` or Windows `Copilot.exe` desktop app | Windows UI Automation (`pywinauto`); takes keyboard focus and clipboard during turns |
 | `auto` | `desktop` when a Copilot desktop app is open, else `copilot` | |
 | `custom` | Any web chat UI by URL | Pre-harness validation checklist with a canary prompt |
@@ -61,7 +62,7 @@ One window: the conversation and a composer, with a slim header (backend, worksp
 - Answers are Markdown (code blocks with a copy button, tables, file paths). HTML from the model is sanitised: no scripts, forms, ids, styles or images (images are shown as links).
 - **Links open outside the app**: `http(s)`/`mailto` in your default browser or mail client; a workspace file opens with its default app (Ctrl+click reveals it in Explorer). Only document types open directly; anything else (for example `.chm`, `.exe`), and any file outside the workspace, asks first. UNC paths are refused.
 - **Drag to the composer**: drag any link or file path from the conversation onto the composer to attach it as a chip; the cursor goes back to the composer. Files from Explorer, URLs and plain text can be dropped too. Chips expand to plain text when sent.
-- Composer: Enter sends, Shift+Enter is a new line, Stop cancels the running turn. Slash commands: `/new`, `/fresh`, `/workspace`, `/backend`, `/steps`, `/yolo`.
+- Composer: Enter sends, Shift+Enter is a new line, Stop cancels the running turn. Slash commands: `/new`, `/fresh`, `/switch-account`, `/workspace`, `/backend`, `/steps`, `/yolo`, `/skills`, `/agents`, `/agent`.
 - Settings: *Open settings file* opens `~/.agent-neo/neo.toml`; *Reload* applies it. A workspace switch keeps the session's yolo and step setting, and never re-labels a backend that is already running (use `/backend`).
 
 ### Show the Version
@@ -148,10 +149,13 @@ Matches GitHub Copilot CLI's agent execution guardrails:
 - `you> /workspace [path]` (or `/cd [path]`): Displays current workspace or switches to another workspace folder on the fly.
 - `you> /new`: Starts a new conversation / topic in the current browser.
 - `you> /fresh`: Recycles the browser process and launches a brand new browser instance.
+- `you> /switch-account` (or `/logout`): Clears cookies & site storage only for the active web chat engine, navigates to its login page on-screen, and waits for sign-in.
 - `you> /yolo`: Toggles auto-approval on/off dynamically during a session.
 - `you> /steps [N]`: Shows current limits or updates the sequential step chunk size on the fly (e.g. `/steps 20`).
-- `you> /skills`: Lists discovered skills across workspace (`.claude/skills/`, `.agents/skills/`, `skills/`, `~/.copilot/skills/`).
-- `you> /backend <desktop|web|graph|auto>`: Dynamically switch backends without restarting.
+- `you> /skills`: Lists discovered skills across workspace and user/engine homes.
+- `you> /agents`: Lists discovered Claude/Copilot-compatible sub-agent personas across workspace (`agents/`, `.github/agents/`, `.claude/agents/`, `.agent-neo/agents/`) and user/engine homes (`~/.copilot/agents/`, etc.).
+- `you> /agent <name> <task>`: Runs one turn directly under a named agent persona and its enforced tool allowlist.
+- `you> /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>`: Dynamically switch backends without restarting.
 - `you> /quit` or `/exit`: Exits agent-neo.
 - Ctrl+C while a turn runs cancels that turn (cooperatively) and returns to the prompt.
 
