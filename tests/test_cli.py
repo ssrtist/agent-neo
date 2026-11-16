@@ -127,6 +127,28 @@ class CliTests(unittest.TestCase):
         self.assertIn("does not support /switch-account.", r.stdout)
         self.assertIn("Audit complete.", r.stdout)
 
+    def test_sessions_and_resume_cli(self) -> None:
+        script_path = self.s.path / "resume_script.json"
+        script_path.write_text(
+            json.dumps({
+                "scenarios": [
+                    {"match": "first task", "replies": [{"type": "final", "message": "First complete."}]},
+                    {"match": "follow up", "replies": [{"type": "final", "message": "Second complete."}]},
+                ]
+            }),
+            encoding="utf-8",
+        )
+        r1 = run_cli(["-w", str(self.ws), "--fake-backend", str(script_path)], "first task\n/sessions\n/quit\n", env=self.env)
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        self.assertIn("First complete.", r1.stdout)
+        self.assertIn("Saved sessions (1):", r1.stdout)
+        self.assertIn("first task", r1.stdout)
+
+        r2 = run_cli(["-w", str(self.ws), "--fake-backend", str(script_path), "--resume"], "follow up\n/quit\n", env=self.env)
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("[session] Resumed", r2.stdout)
+        self.assertIn("Second complete.", r2.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

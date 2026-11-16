@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
@@ -692,6 +693,60 @@ class WebCopilotDriver:
             time.sleep(2.0)
 
         self._clear_composer(page)
+
+    def _is_thread_url(self, url: str) -> bool:
+        """True when *url* points to a specific Copilot conversation rather than the landing page."""
+        if not url or not self._ready_url(url):
+            return False
+        parsed = urllib.parse.urlsplit(url)
+        path = parsed.path or ""
+        if re.search(r"/chats?/[^/]{3,}", path, flags=re.IGNORECASE):
+            return True
+        qs = urllib.parse.parse_qs(parsed.query)
+        return any(k.lower() in ("conversationid", "threadid", "chatid", "convid") and any(v.strip() for v in vals)
+                   for k, vals in qs.items())
+
+    def current_chat_url(self) -> str | None:
+        """Return the active conversation URL if the browser is currently inside a specific chat thread."""
+        page = self._page
+        if page is None:
+            return None
+        try:
+            if hasattr(page, "is_closed") and page.is_closed():
+                return None
+            url = str(getattr(page, "url", "") or "").strip()
+        except Exception:  # noqa: BLE001
+            return None
+        return url if self._is_thread_url(url) else None
+
+    def open_chat_url(self, url: str, timeout_seconds: int = 45) -> bool:
+        """Navigate to a previously saved conversation URL. Returns False (falling back to new chat) if invalid/expired."""
+        target = (url or "").strip()
+        if not target or not self._own_page_url(target):
+            return False
+        parsed = urllib.parse.urlsplit(target)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        try:
+            page = self.connect(timeout_seconds=timeout_seconds)
+            if (getattr(page, "url", "") or "").strip() != target:
+                page.goto(target, wait_until="domcontentloaded")
+                time.sleep(1.2)
+            cur = str(getattr(page, "url", "") or "")
+            if not self._ready_url(cur):
+                self._wait_for_sign_in(page, timeout_seconds)
+            self.find_input(timeout_ms=15000)
+            cur = str(getattr(page, "url", "") or "")
+            if not self._is_thread_url(cur):
+                return False
+            self._clear_composer(page)
+            return True
+        except Exception:  # noqa: BLE001
+            try:
+                self.new_conversation()
+            except Exception:  # noqa: BLE001
+                pass
+            return False
 
     def _clear_composer(self, page, input_box=None) -> None:
         """Ensure the chat composer input is completely cleared."""

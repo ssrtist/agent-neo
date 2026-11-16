@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import time
+import urllib.parse
 from typing import Callable
 
 import copilot_web as web
@@ -135,6 +136,12 @@ class GeminiWebDriver(web.WebCopilotDriver):
 
     def _auth_domains(self) -> tuple[str, ...]:
         return ("gemini.google.com", "accounts.google.com", "google.com")
+
+    def _is_thread_url(self, url: str) -> bool:
+        if not url or not self._ready_url(url):
+            return False
+        path = urllib.parse.urlsplit(url).path or ""
+        return bool(re.search(r"/(?:app|gem/[^/]+)/[a-zA-Z0-9_-]{4,}", path))
 
     def _say(self, text: str) -> None:
         if self.notify:

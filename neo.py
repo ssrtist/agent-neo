@@ -42,6 +42,7 @@ from neo_core import (  # noqa: F401 - parse_action/build_system_prompt/BASE_SYS
     parse_action,
 )
 from neo_events import Cancelled, SessionLog, dedupe_status, fanout
+from neo_sessions import SessionStore, build_fallback_summary, max_turn_number, normalize_backend
 from neo_settings import BACKEND_ALIASES, BACKENDS, BROWSER_MODES, SettingsError, custom_options, load_settings, neo_home
 from neo_version import __version__, version_string  # noqa: F401
 
@@ -225,6 +226,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Offer the run_subagent tool (off by default)")
     parser.add_argument("--new-session-only", "--reuse-browser", dest="new_session_only", action="store_true",
                         help="Reuse existing browser instance and only start a new chat session (default is a fresh browser instance)")
+    parser.add_argument("--resume", nargs="?", const="last", default=None, metavar="SESSION_ID",
+                        help="Resume a previous session by ID (or latest for the active backend)")
+    parser.add_argument("--no-resume", dest="no_resume", action="store_true",
+                        help="Start a brand-new session instead of auto-resuming the last session for the backend")
     parser.add_argument("--fake-backend", nargs="?", const="", default=None, metavar="SCRIPT.json",
                         help=argparse.SUPPRESS)
     return parser
@@ -281,8 +286,37 @@ def main() -> None:
         print("[subagents] run_subagent tool enabled.")
 
     renderer = CliRenderer(settings.show_thinking)
-    log = SessionLog(neo_home())
-    sink = fanout(renderer, dedupe_status(log.write))
+    store = SessionStore(neo_home())
+    session_state: dict[str, Any] = {
+        "id": store.make_session_id(),
+        "log": None,
+        "backend": settings.backend,
+    }
+    session_state["log"] = SessionLog(neo_home(), stamp=session_state["id"])
+
+    def record_and_log(event: dict[str, Any]) -> None:
+        session_state["log"].write(event)
+        etype = event.get("type")
+        if etype == "turn_start":
+            store.record_turn_start(
+                session_state["id"],
+                backend=session_state["backend"],
+                workspace=ROOT,
+                user_text=str(event.get("text", "")),
+                turn=event.get("turn"),
+            )
+        elif etype == "turn_end":
+            chat_url = driver.current_chat_url() if hasattr(driver, "current_chat_url") else None
+            events = store.load_events(session_state["id"])
+            store.record_turn_end(
+                session_state["id"],
+                backend=session_state["backend"],
+                workspace=ROOT,
+                chat_url=chat_url,
+                events=events,
+            )
+
+    sink = fanout(renderer, dedupe_status(record_and_log))
 
     def notify(text: str) -> None:
         renderer({"type": "status", "text": text})
@@ -295,11 +329,89 @@ def main() -> None:
     current_backend = settings.backend
     driver = make_driver(current_backend, settings, new_session_only, fake_script, notify)
     agent = Agent(driver, ROOT, settings, sink, CliApprover(), on_wakeup=on_wakeup)
+
+    def rotate_session() -> None:
+        session_state["id"] = store.make_session_id()
+        session_state["log"] = SessionLog(neo_home(), stamp=session_state["id"])
+        agent.reset_session()
+
+    def apply_resume(rec: dict[str, Any], *, open_remote: bool = True) -> None:
+        global ROOT
+        nonlocal current_backend, driver
+        rec_backend = normalize_backend(rec.get("backend"))
+        if rec_backend in BACKENDS and rec_backend != current_backend:
+            if fake_script is None:
+                new_drv = make_driver(rec_backend, agent.settings, new_session_only, fake_script, notify)
+                driver.close()
+                driver = new_drv
+                agent.driver = driver
+            current_backend = rec_backend
+            session_state["backend"] = current_backend
+            agent.skills = discover_skills(ROOT, backend=current_backend)
+            agent.agents = discover_agents(ROOT, backend=current_backend)
+
+        saved_ws = str(rec.get("workspace") or "").strip()
+        if saved_ws:
+            target_dir = Path(saved_ws)
+            if target_dir.is_dir() and target_dir.resolve() != ROOT:
+                try:
+                    new_settings, warns = load_settings(target_dir.resolve(), overrides)
+                    for w in warns:
+                        print(f"[settings] warning: {w}")
+                    yolo, chunk = agent.auto_approve, agent.step_chunk
+                    ROOT = target_dir.resolve()
+                    agent.set_settings(new_settings)
+                    agent.auto_approve, agent.step_chunk = yolo, chunk
+                    agent.set_workspace(ROOT)
+                    print(f"[session] Switched workspace to: {ROOT}")
+                except SettingsError as exc:
+                    print(f"[session] Keeping {ROOT} (settings error in {target_dir}: {exc})")
+            elif not target_dir.is_dir():
+                print(f"[session] Saved workspace missing ({target_dir}); keeping {ROOT}")
+
+        chat_url = str(rec.get("chat_url") or "").strip()
+        remote_resumed = False
+        if open_remote and chat_url and hasattr(driver, "open_chat_url"):
+            remote_resumed = bool(driver.open_chat_url(chat_url))
+
+        events = store.load_events(rec["id"])
+        fallback_summary = str(rec.get("summary") or "").strip() or build_fallback_summary(events)
+        session_state["id"] = rec["id"]
+        session_state["log"] = SessionLog(neo_home(), stamp=rec["id"])
+        agent.restore_session(
+            last_turn=max_turn_number(events),
+            remote_resumed=remote_resumed,
+            fallback_summary=fallback_summary,
+        )
+        mode_note = "web thread" if remote_resumed else "local transcript + summary seed"
+        print(f"[session] Resumed {rec['id']} [{current_backend}] ({rec.get('turn_count', 0)} turns, {mode_note}): {rec.get('title', '')}")
+
+    # Auto-resume latest session for copilot/gemini/deepseek (or explicit --resume) unless --no-resume
+    resume_target = args.resume
+    if resume_target is None and not args.no_resume and fake_script is None and normalize_backend(current_backend) in ("copilot", "gemini", "deepseek"):
+        auto_rec = store.latest_for_backend(current_backend)
+        if auto_rec is not None:
+            apply_resume(auto_rec, open_remote=True)
+    elif resume_target is not None:
+        if resume_target.lower() == "last":
+            rec = store.latest_for_backend(current_backend)
+            if rec is None:
+                print(f"[session] No previous {current_backend} session found; starting fresh.")
+            else:
+                apply_resume(rec, open_remote=True)
+        else:
+            rec = store.get_session(resume_target)
+            if rec is None:
+                print(f"[session] Session {resume_target!r} not found; starting fresh.")
+            else:
+                apply_resume(rec, open_remote=True)
+
     print(f"Discovered {len(agent.skills)} skills: {', '.join(agent.skills.keys()) if agent.skills else 'none'}")
     print(f"Discovered {len(agent.agents)} agents: {', '.join(agent.agents.keys()) if agent.agents else 'none'}")
     print(f"Active backend: {driver.__class__.__name__}")
     print("Commands: /new, /fresh, /switch-account, /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>, /workspace [path], /skills, /agents, /agent <name> <task>, /steps [N], /yolo, /quit")
     print("Task commands: /tasks, /watch <task_id|Ns> <prompt>, /unwatch [id]")
+    print("Session commands: /sessions [backend], /resume [id|last]")
 
     try:
         while True:
@@ -323,6 +435,7 @@ def main() -> None:
             if user_text == "/new":
                 _drain_queue(wakeup_queue)
                 agent.close()
+                rotate_session()
                 driver.new_conversation()
                 print("Started a new conversation topic.")
                 continue
@@ -330,6 +443,7 @@ def main() -> None:
             if user_text == "/fresh":
                 _drain_queue(wakeup_queue)
                 agent.close()
+                rotate_session()
                 if current_backend in WEB_BACKENDS and fake_script is None:
                     print("Recycling browser and launching a fresh instance...")
                     driver.close()
@@ -491,6 +605,8 @@ def main() -> None:
                         driver = new_drv
                         agent.driver = driver
                         current_backend = target_b
+                        session_state["backend"] = current_backend
+                        rotate_session()
                         agent.skills = discover_skills(ROOT, backend=current_backend)
                         agent.agents = discover_agents(ROOT, backend=current_backend)
                         print(f"Switched backend to {driver.__class__.__name__}")
@@ -498,6 +614,40 @@ def main() -> None:
                         print(f"Failed to switch backend: {exc}")
                 else:
                     print("Usage: /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>")
+                continue
+
+            if user_text.startswith("/sessions"):
+                parts = user_text.split(maxsplit=1)
+                filt = normalize_backend(parts[1]) if len(parts) > 1 and parts[1].strip() else None
+                items = store.list_sessions(backend=filt, limit=15)
+                if not items:
+                    print("No saved sessions found.")
+                else:
+                    print(f"Saved sessions ({len(items)}):")
+                    for idx, s in enumerate(items, start=1):
+                        ws_label = Path(s["workspace"]).name if s.get("workspace") else ""
+                        print(f"  {idx}. {s['id']} [{s.get('backend', '?')}] ({s.get('turn_count', 0)} turns, {ws_label}): {s.get('title', '')}")
+                continue
+
+            if user_text.startswith("/resume"):
+                parts = user_text.split(maxsplit=1)
+                target_arg = parts[1].strip() if len(parts) > 1 else "last"
+                _drain_queue(wakeup_queue)
+                agent.close()
+                rec = None
+                if not target_arg or target_arg.lower() == "last":
+                    rec = store.latest_for_backend(current_backend)
+                elif target_arg.isdigit():
+                    items = store.list_sessions(limit=50)
+                    idx = int(target_arg) - 1
+                    if 0 <= idx < len(items):
+                        rec = items[idx]
+                if rec is None and target_arg and target_arg.lower() != "last":
+                    rec = store.get_session(target_arg)
+                if rec is None:
+                    print(f"Session not found: {target_arg!r}")
+                else:
+                    apply_resume(rec, open_remote=True)
                 continue
 
             run_turn_with_ctrl_c(agent, user_text)

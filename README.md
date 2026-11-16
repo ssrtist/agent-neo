@@ -25,6 +25,7 @@ All web backends share the dedicated Edge profile `%LOCALAPPDATA%\agent-neo-edge
 - [neo.py](neo.py), [neo.cmd](neo.cmd), [agent-neo.cmd](agent-neo.cmd): Command-line REPL; a thin renderer over the agent core.
 - [neo_core.py](neo_core.py): UI-agnostic agent core: run loop, tool protocol (`read_file`, `write_file`, `edit_file`, `delete_file`, `run_shell`, `load_skill`, and `run_subagent` when enabled), approvals through an injected approver, cooperative cancel, session log.
 - [neo_events.py](neo_events.py): The event schema shared by the CLI, the GUI and the session log.
+- [neo_sessions.py](neo_sessions.py): Per-engine session index (`sessions/index.json`), auto-resume lookup, and fallback summary checkpointing.
 - [neo_settings.py](neo_settings.py): `neo.toml` loading (home + workspace + CLI flags); [neo.example.toml](neo.example.toml) documents every key.
 - [neo_gui.py](neo_gui.py), [run-gui.cmd](run-gui.cmd), `gui/`, `tauri/`: the desktop GUI (pytauri-wheel + WebView2; plain HTML/CSS/JS, vendored libraries in `gui/vendor/`).
 - [neo_fake.py](neo_fake.py): Scripted fake chat driver for tests (`--fake-backend`).
@@ -56,13 +57,13 @@ py -3.13 -m venv .venv
 .\run-gui.cmd                                   # copilot backend, off-screen Edge
 .\run-gui.cmd --workspace "C:\path\to\repo" --backend copilot --browser-mode visible
 ```
-One window: the conversation and a composer, with a slim header (backend, workspace, browser mode, yolo, thinking, settings, new chat).
+One window: a splash starting screen featuring branded engine cards (**Microsoft Copilot**, **Google Gemini**, **DeepSeek**, plus Desktop/Custom) with inline **Resume Last**, **New Chat**, and **History** actions, leading into the conversation view and composer with a slim header (Home/Engines, workspace, backend, browser mode, theme, History drawer, zoom).
 - Your request and the final answer are always shown in full. Everything in between is rolled up into one live status line per turn (for example `Step 4/10 · run_shell · running…`); click it to see every step, and click a step to see its arguments and result. Sub-agent activity nests under its `run_subagent` step.
 - Approvals and step-limit prompts appear as an inline card and are never collapsed while they wait for you.
 - Answers are Markdown (code blocks with a copy button, tables, file paths). HTML from the model is sanitised: no scripts, forms, ids, styles or images (images are shown as links).
 - **Links open outside the app**: `http(s)`/`mailto` in your default browser or mail client; a workspace file opens with its default app (Ctrl+click reveals it in Explorer). Only document types open directly; anything else (for example `.chm`, `.exe`), and any file outside the workspace, asks first. UNC paths are refused.
 - **Drag to the composer**: drag any link or file path from the conversation onto the composer to attach it as a chip; the cursor goes back to the composer. Files from Explorer, URLs and plain text can be dropped too. Chips expand to plain text when sent.
-- Composer: Enter sends, Shift+Enter is a new line, Stop cancels the running turn. Slash commands: `/new`, `/fresh`, `/switch-account`, `/workspace`, `/backend`, `/steps`, `/yolo`, `/skills`, `/agents`, `/agent`.
+- Composer: Enter sends, Shift+Enter is a new line, Stop cancels the running turn. Slash commands: `/new`, `/fresh`, `/switch-account`, `/workspace`, `/backend`, `/steps`, `/yolo`, `/skills`, `/agents`, `/agent`, `/sessions`, `/resume`, `/engines`.
 - Settings: *Open settings file* opens `~/.agent-neo/neo.toml`; *Reload* applies it. A workspace switch keeps the session's yolo and step setting, and never re-labels a backend that is already running (use `/backend`).
 
 ### Show the Version
@@ -127,8 +128,8 @@ With `enable_subagents = true` (or `--enable-subagents`) the model gets a `run_s
 ### Thinking lines
 The model may add an optional `thought` field to any reply. It is hidden unless `show_thinking = true`, `--show-thinking`, or the GUI's *thinking* toggle.
 
-### Session log
-Every CLI and GUI session appends its events to `~/.agent-neo/sessions/<timestamp>.jsonl` (no secrets; tool output previews are truncated).
+### Session log & Auto-Resume
+Every CLI and GUI session appends its events to `~/.agent-neo/sessions/<timestamp>.jsonl` (no secrets; tool output previews are truncated) and records per-engine metadata (backend, workspace, title, turn count, and active web conversation URL) in `~/.agent-neo/sessions/index.json`. Selecting Copilot, Gemini, or DeepSeek automatically resumes its last session (restoring the local transcript, switching workspace, and reopening the saved web thread URL—or seeding a fresh chat with a checkpoint summary if the URL expired), while earlier sessions remain selectable from the **History** drawer or via `--resume` / `/sessions` / `/resume` in the CLI (`--no-resume` forces a fresh session).
 
 ### Environment & Files
 - `NEO_ROOT` / `AGENT_NEO_ROOT`: default workspace root when `-w/--workspace` is not given.
@@ -156,6 +157,8 @@ Matches GitHub Copilot CLI's agent execution guardrails:
 - `you> /agents`: Lists discovered Claude/Copilot-compatible sub-agent personas across workspace (`agents/`, `.github/agents/`, `.claude/agents/`, `.agent-neo/agents/`) and user/engine homes (`~/.copilot/agents/`, etc.).
 - `you> /agent <name> <task>`: Runs one turn directly under a named agent persona and its enforced tool allowlist.
 - `you> /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>`: Dynamically switch backends without restarting.
+- `you> /sessions [backend]`: Lists saved sessions across engines (or filtered by backend).
+- `you> /resume [id|index|last]`: Resumes a saved session, switching workspace/backend and reopening its web thread URL if available.
 - `you> /quit` or `/exit`: Exits agent-neo.
 - Ctrl+C while a turn runs cancels that turn (cooperatively) and returns to the prompt.
 

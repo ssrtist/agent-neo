@@ -35,6 +35,7 @@ from urllib.parse import unquote, urlparse
 
 from neo_core import Agent, discover_agents, discover_skills
 from neo_events import Cancelled, SessionLog, dedupe_status, fanout, public
+from neo_sessions import SessionStore, build_fallback_summary, max_turn_number, normalize_backend
 from neo_settings import (
     BACKEND_ALIASES,
     BACKENDS,
@@ -119,8 +120,12 @@ class GuiSession:
         self.pending: dict[str, PendingApproval] = {}
         self.opened: list[dict[str, Any]] = []   # NEO_TEST_NO_OPEN record
         self._shut_down = False
-        self.log = SessionLog(neo_home())
-        self._sink = dedupe_status(fanout(self._to_page, self.log.write))
+        self.store = SessionStore(neo_home())
+        self.session_id = self.store.make_session_id()
+        self.log = SessionLog(neo_home(), stamp=self.session_id)
+        self._sink = dedupe_status(fanout(self._to_page, self._record_event))
+        explicit_backend = bool((cli_overrides or {}).get("backend"))
+        self.on_splash = (fake_script is None) and (not explicit_backend)
         self._load_settings(initial=True)
         self.thread = threading.Thread(target=self._worker, name="neo-worker", daemon=True)
         self.thread.start()
@@ -128,6 +133,42 @@ class GuiSession:
     # ---------------------------------------------------------------- plumbing
     def _to_page(self, event: dict[str, Any]) -> None:
         self.emit_raw(public(event))
+
+    def _record_event(self, event: dict[str, Any]) -> None:
+        self.log.write(event)
+        etype = event.get("type")
+        if etype == "turn_start":
+            try:
+                self.store.record_turn_start(
+                    self.session_id,
+                    backend=self.backend,
+                    workspace=self.workspace,
+                    user_text=str(event.get("text", "")),
+                    turn=event.get("turn"),
+                )
+            except Exception:  # noqa: BLE001
+                _log_error(traceback.format_exc())
+        elif etype == "turn_end":
+            try:
+                chat_url = None
+                drv = self.driver
+                if drv is not None and hasattr(drv, "current_chat_url"):
+                    chat_url = drv.current_chat_url()
+                events = self.store.load_events(self.session_id)
+                self.store.record_turn_end(
+                    self.session_id,
+                    backend=self.backend,
+                    workspace=self.workspace,
+                    chat_url=chat_url,
+                    events=events,
+                )
+            except Exception:  # noqa: BLE001
+                _log_error(traceback.format_exc())
+
+    def _rotate_session_log(self) -> None:
+        with self.lock:
+            self.session_id = self.store.make_session_id()
+            self.log = SessionLog(neo_home(), stamp=self.session_id)
 
     def notice(self, text: str, level: str = "info") -> None:
         self.emit_raw({"type": "gui_notice", "text": text, "level": level})
@@ -149,6 +190,10 @@ class GuiSession:
                 "running": self.running,
                 "busy": self.busy,
                 "fake": self.fake_script is not None,
+                "show_splash": self.on_splash,
+                "active_session_id": self.session_id,
+                "latest_by_backend": self.store.latest_by_backend(),
+                "session_count": len(self.store.list_sessions(limit=200)),
                 "settings_error": self.settings_error,
                 "settings_warnings": list(self.settings_warnings),
                 "settings_files": [str(home_settings_path()), str(workspace_settings_path(self.workspace))],
@@ -251,6 +296,7 @@ class GuiSession:
                 return {"ok": True, "queued": True}
             if self.settings_error:
                 return {"ok": False, "error": "settings", "message": self.settings_error}
+            self.on_splash = False
             self.running = True
         self.jobs.put(("turn", text))
         self.push_state()
@@ -361,6 +407,44 @@ class GuiSession:
 
     def switch_account(self) -> dict[str, Any]:
         return self.queue_job(("switch_account",), "switching account")
+
+    def list_sessions(self, backend: str = "") -> dict[str, Any]:
+        norm = normalize_backend(backend) if (backend or "").strip() else ""
+        return {"ok": True, "sessions": self.store.list_sessions(backend=norm or None, limit=80)}
+
+    def return_to_splash(self) -> dict[str, Any]:
+        with self.lock:
+            if self.running or self.busy:
+                return {"ok": False, "error": "busy"}
+            self.on_splash = True
+        self.push_state()
+        return {"ok": True}
+
+    def enter_engine(self, backend: str, mode: str = "resume_last", session_id: str = "") -> dict[str, Any]:
+        norm = BACKEND_ALIASES.get((backend or "").strip().lower(), (backend or "").strip().lower())
+        sid = (session_id or "").strip()
+        if sid:
+            rec = self.store.get_session(sid)
+            if rec is None:
+                return {"ok": False, "error": f"unknown session {sid!r}"}
+            if not norm:
+                norm = normalize_backend(rec.get("backend")) or self.backend
+        if norm not in BACKENDS:
+            return {"ok": False, "error": f"unknown backend {backend!r}"}
+        clean_mode = "new" if mode == "new" else ("resume" if sid else "resume_last")
+        busy_label = "starting new chat" if clean_mode == "new" else "resuming session"
+        return self.queue_job(("enter_engine", norm, clean_mode, sid), busy_label)
+
+    def resume_session(self, session_id: str) -> dict[str, Any]:
+        sid = (session_id or "").strip()
+        rec = self.store.get_session(sid)
+        if rec is None:
+            self.notice(f"Session not found: {session_id}", "warn")
+            return {"ok": False, "error": "not found"}
+        target_backend = normalize_backend(rec.get("backend"))
+        if target_backend not in BACKENDS:
+            target_backend = self.backend
+        return self.enter_engine(target_backend, mode="resume", session_id=rec["id"])
 
     def set_option(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -607,7 +691,21 @@ class GuiSession:
                 return {"ok": False, **res}
             self.notice(f"Cancelled watches: {', '.join(res.get('cancelled', [])) or 'none'}")
             return {"ok": True, **res}
-        self.notice("Commands: /new, /fresh, /switch-account, /workspace [path], /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>, /steps [N], /yolo, /skills, /agents, /agent <name> <task>, /tasks, /watch, /unwatch",
+        if cmd == "/sessions":
+            items = self.store.list_sessions(backend=normalize_backend(arg) if arg else None, limit=12)
+            if not items:
+                self.notice("No saved sessions yet.")
+            else:
+                lines = [f"{s['id']} [{s.get('backend', '?')}] ({s.get('turn_count', 0)} turns) {s.get('title', '')}" for s in items]
+                self.notice("Saved sessions:\n" + "\n".join(lines))
+            return {"ok": True, "sessions": items}
+        if cmd == "/resume":
+            if not arg or arg.lower() == "last":
+                return self.enter_engine(self.backend, mode="resume_last")
+            return self.resume_session(arg)
+        if cmd in ("/engines", "/home"):
+            return self.return_to_splash()
+        self.notice("Commands: /new, /fresh, /switch-account, /workspace [path], /backend <copilot|gemini|deepseek|whatsapp|desktop|auto|custom>, /steps [N], /yolo, /skills, /agents, /agent <name> <task>, /sessions, /resume, /engines, /tasks, /watch, /unwatch",
                     "info" if cmd == "/help" else "warn")
         return {"ok": cmd == "/help"}
 
@@ -673,6 +771,125 @@ class GuiSession:
                 _log_error(traceback.format_exc())
             self.driver = None
 
+    def _switch_workspace_for_resume(self, saved_ws: str) -> None:
+        raw = (saved_ws or "").strip()
+        if not raw:
+            return
+        target = Path(raw)
+        if not target.is_dir():
+            self.notice(f"Saved workspace no longer exists ({target}); keeping {self.workspace}.", "warn")
+            return
+        resolved = target.resolve()
+        if resolved == self.workspace:
+            return
+        if not self._load_settings(workspace=resolved, keep_session=True):
+            self.notice(f"Could not load settings for {resolved}; keeping {self.workspace}.", "warn")
+            return
+        with self.lock:
+            self.workspace = resolved
+            if self.agent is not None:
+                self.agent.set_workspace(resolved)
+        self.notice(f"Switched workspace to: {resolved}")
+
+    def _handle_enter_engine(self, target_backend: str, mode: str, session_id: str) -> None:
+        with self.lock:
+            self.wakeup_queue.clear()
+        if self.agent is not None:
+            self.agent.close()
+
+        rec: dict[str, Any] | None = None
+        if mode != "new":
+            if session_id:
+                rec = self.store.get_session(session_id)
+            else:
+                rec = self.store.latest_for_backend(target_backend)
+
+        if rec is None:
+            # Start fresh on target_backend
+            if target_backend != self.backend or self.driver is None:
+                new_drv = self._make_driver(target_backend)
+                self._close_driver()
+                self.driver = new_drv
+                with self.lock:
+                    self.backend = target_backend
+            elif self.driver is not None:
+                self.driver.new_conversation()
+            self._rotate_session_log()
+            if self.agent is not None:
+                self.agent.driver = self.driver
+                self.agent.reset_session()
+                self.agent.skills = discover_skills(self.workspace, backend=self.backend)
+                self.agent.agents = discover_agents(self.workspace, backend=self.backend)
+            with self.lock:
+                self.on_splash = False
+            self.emit_raw({
+                "type": "gui_session_loaded",
+                "session_id": self.session_id,
+                "backend": self.backend,
+                "workspace": str(self.workspace),
+                "events": [],
+                "resumed": False,
+            })
+            return
+
+        rec_backend = normalize_backend(rec.get("backend"))
+        if rec_backend in BACKENDS:
+            target_backend = rec_backend
+
+        self._switch_workspace_for_resume(str(rec.get("workspace", "")))
+
+        backend_changed = target_backend != self.backend
+        if self.driver is None or backend_changed:
+            new_drv = self._make_driver(target_backend)
+            self._close_driver()
+            self.driver = new_drv
+            with self.lock:
+                self.backend = target_backend
+
+        chat_url = str(rec.get("chat_url") or "").strip()
+        remote_resumed = False
+        if chat_url and hasattr(self.driver, "open_chat_url"):
+            remote_resumed = bool(self.driver.open_chat_url(chat_url))
+        elif self.driver is not None and not backend_changed and self.session_id != rec["id"]:
+            try:
+                self.driver.new_conversation()
+            except Exception:  # noqa: BLE001
+                pass
+
+        events = self.store.load_events(rec["id"])
+        fallback_summary = str(rec.get("summary") or "").strip() or build_fallback_summary(events)
+        with self.lock:
+            self.session_id = rec["id"]
+            self.log = SessionLog(neo_home(), stamp=self.session_id)
+            self.on_splash = False
+
+        agent = self._ensure_agent()
+        agent.skills = discover_skills(self.workspace, backend=self.backend)
+        agent.agents = discover_agents(self.workspace, backend=self.backend)
+        agent.restore_session(
+            last_turn=max_turn_number(events),
+            remote_resumed=remote_resumed,
+            fallback_summary=fallback_summary,
+        )
+
+        self.emit_raw({
+            "type": "gui_session_loaded",
+            "session_id": rec["id"],
+            "backend": self.backend,
+            "workspace": str(self.workspace),
+            "title": str(rec.get("title") or ""),
+            "events": events,
+            "resumed": True,
+            "remote_resumed": remote_resumed,
+            "chat_url": chat_url,
+        })
+        if remote_resumed:
+            self.notice(f"Resumed {self.backend} session: {rec.get('title') or rec['id']}")
+        elif chat_url:
+            self.notice("Saved web chat URL could not be reopened; restored transcript and seeded a fresh chat with context.", "warn")
+        else:
+            self.notice(f"Restored local {self.backend} transcript and seeded context.")
+
     def _worker(self) -> None:
         while True:
             job = self.jobs.get()
@@ -696,24 +913,38 @@ class GuiSession:
                 elif kind == "new_chat":
                     with self.lock:
                         self.wakeup_queue.clear()
+                        self.on_splash = False
                     if self.agent is not None:
                         self.agent.close()
+                        self.agent.reset_session()
+                    self._rotate_session_log()
                     if self.driver is not None:
                         self.driver.new_conversation()
+                    self.emit_raw({"type": "gui_session_loaded", "session_id": self.session_id,
+                                   "backend": self.backend, "events": [], "resumed": False})
                     self.notice("Started a new conversation topic.")
                 elif kind == "fresh":
                     with self.lock:
                         self.wakeup_queue.clear()
+                        self.on_splash = False
                     if self.agent is not None:
                         self.agent.close()
+                        self.agent.reset_session()
+                    self._rotate_session_log()
                     if self.backend in WEB_BACKENDS and self.fake_script is None:
                         self._close_driver()
                         self.driver = self._make_driver(self.backend, fresh=True)
+                        self.emit_raw({"type": "gui_session_loaded", "session_id": self.session_id,
+                                       "backend": self.backend, "events": [], "resumed": False})
                         self.notice(f"Fresh {type(self.driver).__name__} ready (the browser starts with the next prompt).")
                     else:
                         if self.driver is not None:
                             self.driver.new_conversation()
+                        self.emit_raw({"type": "gui_session_loaded", "session_id": self.session_id,
+                                       "backend": self.backend, "events": [], "resumed": False})
                         self.notice("Started fresh conversation.")
+                elif kind == "enter_engine":
+                    self._handle_enter_engine(job[1], job[2], job[3])
                 elif kind == "switch_account":
                     with self.lock:
                         self.wakeup_queue.clear()
@@ -734,11 +965,13 @@ class GuiSession:
                         self.wakeup_queue.clear()
                     if self.agent is not None:
                         self.agent.task_manager.clear_watches()
+                        self.agent.reset_session()
                     new = self._make_driver(job[1])
                     self._close_driver()
                     self.driver = new
                     with self.lock:
                         self.backend = job[1]
+                    self._rotate_session_log()
                     if self.agent is not None:
                         self.agent.skills = discover_skills(self.workspace, backend=job[1])
                         self.agent.agents = discover_agents(self.workspace, backend=job[1])
@@ -919,6 +1152,32 @@ def main(argv: list[str] | None = None) -> int:
     @commands.command()
     async def open_settings(body: Body, app_handle: AppHandle) -> Body:
         return Body(session.open_settings())
+
+    @commands.command()
+    async def list_sessions(body: Body, app_handle: AppHandle) -> Body:
+        b = body_dict(body)
+        return Body(session.list_sessions(str(b.get("backend", ""))))
+
+    @commands.command()
+    async def enter_engine(body: Body, app_handle: AppHandle) -> Body:
+        bind(app_handle)
+        b = body_dict(body)
+        return Body(session.enter_engine(
+            str(b.get("backend", "")),
+            str(b.get("mode", "resume_last")),
+            str(b.get("session_id", "")),
+        ))
+
+    @commands.command()
+    async def resume_session(body: Body, app_handle: AppHandle) -> Body:
+        bind(app_handle)
+        b = body_dict(body)
+        return Body(session.resume_session(str(b.get("session_id", ""))))
+
+    @commands.command()
+    async def return_to_splash(body: Body, app_handle: AppHandle) -> Body:
+        bind(app_handle)
+        return Body(session.return_to_splash())
 
     @commands.command()
     async def test_opened(body: Body, app_handle: AppHandle) -> Body:

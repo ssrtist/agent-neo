@@ -21,6 +21,9 @@ const turnEls = new Map();   // turn id -> <section>
 let chips = [];
 let shownStartupWarnings = false;
 const conv = $('conv'), ta = $('prompt');
+const welcomeTemplate = $('welcome') ? $('welcome').cloneNode(true) : null;
+let historyCache = [];
+let historyFilter = 'all';
 window.__neo = { model, get state() { return st; } };  // read-only handle for e2e diagnostics
 
 // ------------------------------------------------------------------ events
@@ -29,6 +32,7 @@ function onEvent(raw) {
   if (typeof e === 'string') { try { e = JSON.parse(e); } catch { return; } }
   if (!e || typeof e !== 'object') return;
   if (e.type === 'gui_state') return applyState(e);
+  if (e.type === 'gui_session_loaded') return applyLoadedSession(e);
   const stick = nearBottom();
   const changed = apply(model, e);
   if (changed === 'notice') appendNotice(model.items[model.items.length - 1]);
@@ -67,11 +71,84 @@ function applyState(s) {
   // startup settings warnings (later loads push them as notices from Python); shown once
   if (!shownStartupWarnings) { shownStartupWarnings = true; for (const w of s.settings_warnings || []) notice(w, 'warn'); }
   const busy = !!s.busy;
+  const onSplash = !!s.show_splash;
+  if ($('splash')) $('splash').hidden = !onSplash;
+  conv.hidden = onSplash;
+  $('composer').hidden = onSplash;
+  if ($('home-btn')) $('home-btn').disabled = busy || !!s.running;
+  if ($('history-btn')) $('history-btn').disabled = busy || !!s.running;
+  renderSplashLast(s.latest_by_backend || {}, busy || !!s.running);
   $('send').disabled = busy;
   $('switch-account').disabled = busy || !!s.running;
   $('stop').hidden = !s.running;
   $('hint').textContent = s.busy ? s.busy + '…' : s.running ? 'Working… (Enter queues, Ctrl+Enter steers, Stop ends turn)' : '';
   if (thinkingChanged) for (const id of turnEls.keys()) renderTurn(id);
+}
+
+function formatRelTime(ts) {
+  if (!ts) return '';
+  const diff = Math.max(0, Date.now() - Number(ts));
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(Number(ts)).toLocaleDateString();
+}
+
+function renderSplashLast(latest, disabled) {
+  for (const card of document.querySelectorAll('.engine-card[data-backend]')) {
+    const b = card.dataset.backend;
+    const rec = latest[b];
+    const line = card.querySelector('.engine-last');
+    const cta = card.querySelector('.engine-cta');
+    if (line) {
+      if (rec) {
+        const when = formatRelTime(rec.updated_at);
+        line.textContent = `Last: ${rec.title || rec.id}${when ? ' · ' + when : ''}`;
+        line.classList.remove('empty');
+      } else {
+        line.textContent = 'No previous sessions — starts fresh';
+        line.classList.add('empty');
+      }
+    }
+    if (cta) cta.textContent = rec ? 'Resume Last' : 'Start Fresh';
+    card.classList.toggle('disabled', !!disabled);
+    card.querySelectorAll('button').forEach((btn) => { btn.disabled = !!disabled; });
+  }
+  document.querySelectorAll('.secondary-card').forEach((btn) => { btn.disabled = !!disabled; });
+  if ($('splash-history-btn')) $('splash-history-btn').disabled = !!disabled;
+}
+
+function applyLoadedSession(payload) {
+  model.items = [];
+  model.turns.clear();
+  openKeys.clear();
+  turnEls.clear();
+  conv.replaceChildren();
+  const events = Array.isArray(payload.events) ? payload.events : [];
+  if (events.length === 0) {
+    if (welcomeTemplate) conv.append(welcomeTemplate.cloneNode(true));
+  } else {
+    for (const ev of events) {
+      apply(model, ev);
+    }
+    for (const turn of model.turns.values()) {
+      if (turn.running) {
+        turn.running = false;
+        turn.outcome = turn.outcome || 'cancelled';
+        turn.status = '';
+      }
+    }
+    for (const item of model.items) {
+      if (item.kind === 'notice') appendNotice(item);
+      else if (item.kind === 'turn') renderTurn(item.id);
+    }
+  }
+  scrollDown();
+  if (!$('composer').hidden) ta.focus();
 }
 
 function fillSelect(sel, values, current) {
@@ -544,6 +621,139 @@ $('settings').onclick = () => invoke('open_settings');
 $('reload').onclick = () => invoke('reload_settings');
 $('new-chat').onclick = () => invoke('new_chat');
 $('switch-account').onclick = () => invoke('switch_account');
+if ($('home-btn')) $('home-btn').onclick = () => invoke('return_to_splash');
+if ($('history-btn')) $('history-btn').onclick = () => openHistoryDrawer('all');
+if ($('splash-history-btn')) $('splash-history-btn').onclick = () => openHistoryDrawer('all');
+
+// ------------------------------------------------------------------ splash & history drawer
+const ENGINE_LABELS = {
+  copilot: 'Copilot',
+  gemini: 'Gemini',
+  deepseek: 'DeepSeek',
+  desktop: 'Desktop',
+  custom: 'Custom',
+  whatsapp: 'WhatsApp',
+  auto: 'Auto',
+};
+
+function launchEngine(backend, mode = 'resume_last') {
+  if (st.busy || st.running) return;
+  invoke('enter_engine', { backend, mode }).catch((err) => notice(`failed to launch ${backend}: ${err}`, 'error'));
+}
+
+for (const card of document.querySelectorAll('.engine-card[data-backend]')) {
+  const backend = card.dataset.backend;
+  card.addEventListener('click', (e) => {
+    const actionEl = e.target.closest('[data-action]');
+    const action = actionEl ? actionEl.dataset.action : 'resume';
+    if (action === 'history') {
+      e.stopPropagation();
+      openHistoryDrawer(backend);
+      return;
+    }
+    if (action === 'new') {
+      e.stopPropagation();
+      launchEngine(backend, 'new');
+      return;
+    }
+    launchEngine(backend, 'resume_last');
+  });
+  card.addEventListener('keydown', (e) => {
+    if (e.target !== card) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      launchEngine(backend, 'resume_last');
+    }
+  });
+}
+
+for (const btn of document.querySelectorAll('.secondary-card[data-backend]')) {
+  btn.addEventListener('click', () => launchEngine(btn.dataset.backend, 'resume_last'));
+}
+
+function renderHistoryList() {
+  const list = $('history-list');
+  if (!list) return;
+  const primary = new Set(['copilot', 'gemini', 'deepseek']);
+  const filtered = historyCache.filter((item) => {
+    const b = (item.backend || '').toLowerCase();
+    if (historyFilter === 'all') return true;
+    if (historyFilter === 'other') return !primary.has(b);
+    return b === historyFilter;
+  });
+  if (filtered.length === 0) {
+    list.replaceChildren(el('div', 'history-empty', 'No saved sessions match this filter yet.'));
+    return;
+  }
+  const nodes = filtered.map((item) => {
+    const btn = el('button', 'history-item' + (item.id === st.active_session_id ? ' active' : ''));
+    btn.type = 'button';
+    btn.dataset.testid = `history-item-${item.id}`;
+    const b = (item.backend || 'unknown').toLowerCase();
+    const top = el('div', 'history-item-top');
+    top.append(
+      el('span', 'history-engine', ENGINE_LABELS[b] || b),
+      el('span', '', `${item.turn_count || 0} turn${item.turn_count === 1 ? '' : 's'}`),
+      el('span', 'history-time', formatRelTime(item.updated_at)),
+    );
+    const title = el('div', 'history-title', item.title || item.id);
+    const meta = el('div', 'history-meta');
+    const wsName = item.workspace ? item.workspace.replace(/^.*[\\/]/, '') || item.workspace : '(no workspace)';
+    meta.append(el('span', 'history-ws', wsName));
+    if (item.chat_url) meta.append(el('span', 'history-thread', 'Web thread'));
+    btn.title = [item.title || item.id, item.workspace || '', item.chat_url || ''].filter(Boolean).join('\n');
+    btn.append(top, title, meta);
+    btn.onclick = () => {
+      closeHistoryDrawer();
+      invoke('resume_session', { session_id: item.id }).catch((err) => notice(`resume failed: ${err}`, 'error'));
+    };
+    return btn;
+  });
+  list.replaceChildren(...nodes);
+}
+
+function setHistoryFilter(filter) {
+  historyFilter = filter || 'all';
+  document.querySelectorAll('#history-filters .filter-pill').forEach((p) => {
+    p.classList.toggle('on', p.dataset.filter === historyFilter);
+  });
+  renderHistoryList();
+}
+
+async function openHistoryDrawer(filter = 'all') {
+  const drawer = $('history-drawer');
+  if (!drawer) return;
+  setHistoryFilter(filter);
+  drawer.hidden = false;
+  $('history-list').replaceChildren(el('div', 'history-empty', 'Loading sessions…'));
+  try {
+    const res = await invoke('list_sessions', {});
+    historyCache = Array.isArray(res && res.sessions) ? res.sessions : [];
+    renderHistoryList();
+  } catch (err) {
+    $('history-list').replaceChildren(el('div', 'history-empty', `Failed to load history: ${err}`));
+  }
+}
+
+function closeHistoryDrawer() {
+  const drawer = $('history-drawer');
+  if (drawer) drawer.hidden = true;
+}
+
+if ($('history-close')) $('history-close').onclick = closeHistoryDrawer;
+if ($('history-drawer')) {
+  $('history-drawer').addEventListener('click', (e) => {
+    if (e.target === $('history-drawer')) closeHistoryDrawer();
+  });
+}
+document.querySelectorAll('#history-filters .filter-pill').forEach((p) => {
+  p.onclick = () => setHistoryFilter(p.dataset.filter);
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('history-drawer') && !$('history-drawer').hidden) {
+    closeHistoryDrawer();
+  }
+});
 
 // ------------------------------------------------------------------ colour theme (plan v0.5 D4)
 // theme-boot.js applied the saved theme before first paint; this keeps the header dropdown in step and saves changes.

@@ -160,6 +160,25 @@ class GuiFeaturesTests(unittest.TestCase):
             ("switch_account",),
         ])
 
+    def test_html_contains_splash_cards_and_history_drawer(self) -> None:
+        html = (REPO / "gui" / "index.html").read_text(encoding="utf-8")
+        for token in (
+            'id="splash"',
+            'id="home-btn"',
+            'id="history-btn"',
+            'id="history-drawer"',
+            'data-backend="copilot"',
+            'data-backend="gemini"',
+            'data-backend="deepseek"',
+            'data-backend="desktop"',
+            'data-backend="custom"',
+        ):
+            self.assertIn(token, html)
+
+        app_js = (REPO / "gui" / "app.js").read_text(encoding="utf-8")
+        for token in ("enter_engine", "resume_session", "return_to_splash", "list_sessions", "gui_session_loaded"):
+            self.assertIn(token, app_js)
+
 
 if __name__ == "__main__":
     unittest.main()

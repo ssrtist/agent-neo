@@ -51,7 +51,7 @@ DEMO_SCRIPT: dict[str, Any] = {
     "fallback": "{\"type\":\"final\",\"message\":\"(fake backend) no scripted reply left\"}",
 }
 
-_TURN_MARKERS = ("USER REQUEST:\n", "TASK:\n")
+_TURN_MARKERS = ("USER REQUEST:\n", "CURRENT USER REQUEST / NEXT STEP:\n", "TASK:\n")
 
 
 def load_script(path: str | Path | None) -> dict[str, Any]:
@@ -129,7 +129,7 @@ class FakeChatDriver:
 
     # ---- script selection
     def _maybe_start_turn(self, prompt: str) -> None:
-        if "You are the reasoning component" not in prompt:
+        if "You are the reasoning component" not in prompt and "Resumed Agent Neo session" not in prompt:
             return  # a tool-result / retry prompt continues the current turn
         if "restarted after a sub-agent ran" in prompt:
             return  # the core re-sent the system prompt after a lost context: same turn

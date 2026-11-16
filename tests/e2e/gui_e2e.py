@@ -609,6 +609,27 @@ class Run:
         bk = page.evaluate("[...document.querySelectorAll('#backend option')].map(o => o.value)")
         self.check('backend dropdown includes deepseek, custom and whatsapp', 'custom' in bk and 'copilot' in bk and 'deepseek' in bk and 'whatsapp' in bk, str(bk))
 
+        # ---- splash screen & history drawer
+        page.click('[data-testid=history-btn]')
+        page.wait_for_selector('[data-testid=history-drawer]:not([hidden])', timeout=10000)
+        page.wait_for_function("() => document.querySelectorAll('#history-list .history-item').length >= 1", timeout=10000)
+        h_count = page.locator('#history-list .history-item').count()
+        self.check('history drawer lists recorded sessions', h_count >= 1, str(h_count))
+        page.click('[data-testid=history-close]')
+        self.check('history drawer closes cleanly', page.is_hidden('[data-testid=history-drawer]'))
+
+        page.click('[data-testid=home-btn]')
+        page.wait_for_selector('[data-testid=splash]:not([hidden])', timeout=10000)
+        self.check(
+            'splash screen shows Copilot, Gemini, and DeepSeek cards',
+            page.is_visible('[data-testid=engine-card-copilot]')
+            and page.is_visible('[data-testid=engine-card-gemini]')
+            and page.is_visible('[data-testid=engine-card-deepseek]'),
+        )
+        page.click('[data-testid=engine-card-copilot]')
+        page.wait_for_function("() => window.__neo && window.__neo.state && !window.__neo.state.show_splash && !window.__neo.state.busy", timeout=15000)
+        self.check('clicking Copilot card resumes session and enters workspace view', page.is_visible('[data-testid=composer]'))
+
         self.check("no page errors", not errors, "; ".join(errors)[:300])
 
 

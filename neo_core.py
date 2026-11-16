@@ -1521,10 +1521,31 @@ class Agent:
         self.step_delay_range: tuple[float, float] = (0.2, 1.0)
         self._sub_counter = 0
         self._context_lost = False
+        self._remote_resumed = False
         self._custom = read_custom_instructions(settings)
         self.task_manager = TaskManager(self.root, on_wakeup=on_wakeup)
         self._compact_checkpoint = ""
         self.pending_steering: str | None = None
+
+    def reset_session(self) -> None:
+        """Reset per-conversation turn and resume state for a brand-new chat."""
+        self.events.turn = None
+        self._compact_checkpoint = ""
+        self._remote_resumed = False
+        self._context_lost = False
+
+    def restore_session(
+        self,
+        *,
+        last_turn: int = 0,
+        remote_resumed: bool = False,
+        fallback_summary: str = "",
+    ) -> None:
+        """Prepare the agent to continue a previously recorded session."""
+        self.events.turn = max(0, int(last_turn)) or None
+        self._context_lost = False
+        self._remote_resumed = bool(remote_resumed)
+        self._compact_checkpoint = "" if remote_resumed else (fallback_summary or "").strip()
 
     # ---- plumbing
 
@@ -1689,6 +1710,14 @@ class Agent:
 
     def first_prompt(self, user_text: str) -> str:
         title = self.session_title_line(user_text)
+        if self._remote_resumed:
+            self._remote_resumed = False
+            return (
+                f"{title}\n\n"
+                f"(Resumed Agent Neo session in workspace: {self.root}. "
+                "Continue using the exact agent-neo JSON tool/final protocol already established above.)\n\n"
+                f"USER REQUEST:\n{user_text}"
+            )
         base = f"{title}\n\n{self.system_prompt()}\n\nUSER REQUEST:\n{user_text}"
         if self._compact_checkpoint:
             base = (
